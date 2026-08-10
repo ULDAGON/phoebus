@@ -40,6 +40,11 @@ jobs:
       - name: Bundle Phoebus.app
         run: |
           scripts/bundle-macos.sh --skip-build
+          # bundle-macos.sh only warns when Xcode's actool is missing, because a developer
+          # on Command Line Tools alone should still get a bundle. A release must not ship
+          # without it: no Assets.car means macOS 26 falls back to the .icns and shrinks
+          # the icon in the Dock.
+          test -f target/bundle/Phoebus.app/Contents/Resources/Assets.car
           # ad-hoc signature so the universal binary launches on Apple silicon
           codesign --force --deep -s - target/bundle/Phoebus.app
           ditto -c -k --keepParent target/bundle/Phoebus.app Phoebus-macos-universal.zip

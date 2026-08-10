@@ -7,13 +7,20 @@
 # Inputs   assets/icon/phoebus.svg          the macOS plate (824 body in a 1024 canvas)
 #          assets/icon/phoebus-square.svg   full-bleed, for Linux and the window icon
 #
-# Outputs  assets/icon/Phoebus.icns         macOS bundle icon (10 iconutil entries, 16..1024)
+# Outputs  assets/icon/Phoebus.icns         macOS bundle icon up to macOS 15
+#                                           (10 iconutil entries, 16..1024)
 #          assets/icon/hicolor/<N>x<N>/apps/phoebus.png   Linux hicolor set
 #          assets/icon/phoebus-256.png      the plate PNG compiled into the binary
 #                                           (window icon everywhere, Dock icon on macOS)
 #
 # All three are committed, so building Phoebus from source needs none of the tools below —
 # this script only has to run when the SVGs change.
+#
+# The macOS 26 icon is not here. Tahoe wants artwork with no plate on it and composites the
+# plate itself, so it gets its own source — assets/icon/Phoebus.icon, hand-written and
+# committed as-is — which scripts/bundle-macos.sh compiles with actool at bundle time.
+# Nothing about it is a raster this script could produce, and actool's output cannot be
+# committed: it orders its assets by a hash that moves between runs.
 #
 # Requires rsvg-convert (brew install librsvg) plus iconutil and sips, which ship with
 # macOS. Without a Mac you can still refresh the hicolor set and the window icon; only the
@@ -40,7 +47,11 @@ render() { # render <svg> <px> <out>
 	rsvg-convert -w "$2" -h "$2" "$1" -o "$3"
 }
 
-# ---- macOS: Phoebus.icns ----------------------------------------------------------------
+# ---- macOS 11..15: Phoebus.icns ----------------------------------------------------------
+# The plate artwork goes in whole, because these systems draw an app icon exactly as the
+# .icns gives it — the rounded square has to be in the pixels. macOS 26 reads Assets.car
+# instead (see the note above and scripts/bundle-macos.sh) and ignores this file.
+#
 # iconutil only accepts the classic names, and the @2x file of one entry is the same pixel
 # count as the 1x file of the next: 16/32, 32/64, 128/256, 256/512, 512/1024.
 if command -v iconutil >/dev/null 2>&1; then

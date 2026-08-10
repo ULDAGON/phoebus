@@ -6,7 +6,8 @@
 //! |-------|------------------|
 //! | Linux taskbars / window managers | [`window_icon`] via `ViewportBuilder::with_icon` |
 //! | macOS Dock and ⌘-Tab, run unbundled | [`set_dock_icon`] via AppKit |
-//! | macOS Dock, run from `Phoebus.app` | `Contents/Resources/Phoebus.icns` in the bundle |
+//! | macOS 26 Dock, run from `Phoebus.app` | `Contents/Resources/Assets.car` in the bundle |
+//! | macOS 11…15 Dock, run from `Phoebus.app` | `Contents/Resources/Phoebus.icns` |
 //!
 //! The embedded PNG is `assets/icon/phoebus-256.png`, rendered from
 //! `assets/icon/phoebus.svg` by `scripts/make-icons.sh`. It is the *plate* artwork (the
@@ -60,11 +61,12 @@ pub fn window_icon() -> Option<egui::IconData> {
 /// rocket. `-[NSApplication setApplicationIconImage:]` is the documented override.
 ///
 /// It is also a *replacement*, which is why a bundled run returns early. The setter swaps
-/// the process's icon wholesale: called from `Phoebus.app` it would throw away the
-/// ten-representation `Phoebus.icns` that LaunchServices resolved from the `Info.plist`
-/// and leave this single 256 px raster in its place — which a Retina Dock (and ⌘-Tab,
-/// which asks for far more than 256) then has to scale up. A bundle already has the better
-/// icon; the runtime override exists only for the processes that have none.
+/// the process's icon wholesale: called from `Phoebus.app` it would throw away whatever
+/// LaunchServices resolved from the `Info.plist` — the `Assets.car` icon on macOS 26, the
+/// ten-representation `Phoebus.icns` before that — and leave this single 256 px raster in
+/// its place, which a Retina Dock (and ⌘-Tab, which asks for far more than 256) then has
+/// to scale up. A bundle already has the better icon; the runtime override exists only for
+/// the processes that have none.
 ///
 /// Must run on the main thread — hence the [`MainThreadMarker`](objc2::MainThreadMarker),
 /// which is `None` anywhere else and turns the whole thing into a no-op rather than a

@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024"
+     role="img" aria-label="Phoebus">
+  <title>Phoebus</title>
+
+  <!--
+    The mark alone, on nothing: the single layer of assets/icon/Phoebus.icon. macOS 26
+    supplies the plate, the mask and the shading, so this file must contain only the
+    foreground — the ring and the play triangle, transparent everywhere else.
+
+    Same geometry as phoebus-square.svg's mark after its 0.85 shrink, baked in rather than
+    applied by a transform: ring outer radius 375.14, inner 257.63 (73.3 % of the canvas
+    across, which is where Music.app and Podcasts.app put their glyphs on the same grid).
+
+    Every shape is a filled path. Icon Composer flattens a stroked shape to the region its
+    outline encloses — the ring drawn as `stroke` on a `circle` renders as a solid disc —
+    so the ring is an even-odd annulus and the colour comes from the layer's `fill` in
+    icon.json, not from here. The `#FEFB54` below only makes the file legible on its own.
+  -->
+
+  <g fill="#FEFB54">
+    <path fill-rule="evenodd"
+          d="M 136.86 512 A 375.14 375.14 0 1 0 887.14 512 A 375.14 375.14 0 1 0 136.86 512 Z
+             M 254.37 512 A 257.63 257.63 0 1 0 769.63 512 A 257.63 257.63 0 1 0 254.37 512 Z"/>
+    <path d="M 397.37 288.27 L 746.35 489.76 A 25.68 25.68 0 0 1 746.35 534.24 L 397.37 735.73 A 25.68 25.68 0 0 1 358.86 713.48 L 358.86 310.52 A 25.68 25.68 0 0 1 397.37 288.27 Z"/>
+  </g>
+</svg>

@@ -9,8 +9,10 @@ beyond cargo.
 ```
 icon/phoebus.svg              the source artwork: Big Sur plate, 824 body in a 1024 canvas
 icon/phoebus-square.svg       the same mark full-bleed, no plate, no margin
-icon/reference.jpg            the raster both were measured off, kept as the design reference
-icon/Phoebus.icns             generated — the macOS bundle icon, 16…1024 with @2x pairs
+icon/Phoebus.icon/            the source artwork again, as macOS 26 wants it: icon.json
+                              plus Assets/mark.svg, the mark on nothing
+icon/reference.jpg            the raster they were measured off, kept as the design reference
+icon/Phoebus.icns             generated — the macOS 11…15 bundle icon, 16…1024 with @2x pairs
 icon/hicolor/<N>x<N>/apps/    generated — the Linux icon theme set, 32/48/64/128/256/512
 icon/phoebus-256.png          generated — compiled into the binary (window + Dock icon)
 linux/phoebus.desktop         the launcher entry template
@@ -28,12 +30,39 @@ evidence the artwork moved.
 ## macOS
 
 `scripts/bundle-macos.sh` builds `--release` and wraps the binary in
-`target/bundle/Phoebus.app`, with `Phoebus.icns` in `Contents/Resources` and an
-`Info.plist` naming `dev.phoebus.player`. Drag it to `/Applications` if you want it there.
+`target/bundle/Phoebus.app`, with an `Info.plist` naming `dev.phoebus.player` and **two**
+icons in `Contents/Resources` — `Phoebus.icns` and a compiled `Assets.car`. Drag it to
+`/Applications` if you want it there.
+
+Two icons because macOS 26 changed what an app icon is. Up to macOS 15 the `.icns` *is* the
+icon: the rounded plate is part of the artwork and the system draws the file untouched.
+macOS 26 composites every icon itself — it masks the artwork to the system squircle and
+adds the plate, the shading and the shadow — and reads an app that offers only an `.icns`
+as pre-Tahoe art with a plate already baked in, so it shrinks that art to about two thirds
+and centres it on a grey system plate of its own. The result is a small dark tile floating
+inside a bigger pale one, which is exactly what it looks like.
+
+The numbers, measured off what `NSWorkspace` hands back for a registered bundle, rendered
+at 1024: with only an `.icns`, the yellow mark spans 408 px. With `Assets.car`, 604 px —
+which is the size it is drawn at, and the same fraction of the plate that Music.app and
+Podcasts.app give their glyphs. Both put the plate at 824 px of 1024, the macOS grid.
+
+So the `.icon` carries the mark on a flat navy field and no plate at all, and lets Tahoe do
+the compositing. `scripts/bundle-macos.sh` compiles it with `actool`, which ships inside
+Xcode; a machine with only the Command Line Tools still gets a bundle, just one that
+Tahoe's Dock shrinks. `Assets.car` is not committed like the other generated files because
+it cannot be: `actool` serialises the archive in an order that varies between runs, so the
+file differs byte for byte every time even when nothing changed.
+
+The two `Info.plist` keys are how the split works. `CFBundleIconFile` names the `.icns`,
+`CFBundleIconName` names the asset inside `Assets.car`; macOS 26 prefers the second and
+everything older has never heard of it. Apple's own apps ship exactly this pair — see
+`Music.app/Contents/Info.plist`.
 
 Run unbundled (`cargo run`, `./target/release/phoebus`) and there is no `Info.plist` for
 AppKit to read, so `crates/phoebus-app/src/icon.rs` sets the Dock icon at runtime instead —
-the same artwork, no bundle required.
+the plate PNG, which is the best a process with no bundle can do, since
+`setApplicationIconImage:` takes an image and not an icon asset.
 
 ## Linux
 
@@ -64,6 +93,11 @@ gradient and no rim; it has no edge for a light to catch. The yellow is delibera
 the app's `#FFFB00` accent — the icon is the brand mark, the accent is a UI token, and they
 are allowed to differ.
 
+`icon.json` restates the same two colours as its background `fill` and its one layer's
+`fill`, because the `.icon` format keeps colour in the document and not in the artwork —
+`Assets/mark.svg` is a stencil, and Icon Composer paints it. The rim light has no
+counterpart there and does not need one: Tahoe lights the edge itself.
+
 Neither SVG is a trace of the reference. Every number below was measured off it and the
 shapes re-drawn from those measurements, which is why the geometry can be stated as exact
 fractions at all.
@@ -74,6 +108,16 @@ ring outer diameter 86.2 % with a 13.5 % stroke; the play triangle equilateral w
 centre. That last nudge is the reference's, and it is what puts the apex just short of the
 ring while the two left corners kiss it.
 
+`Assets/mark.svg` is that mark after the 0.85 shrink the other two apply with a transform,
+baked into the path data instead: outer radius 375.14, inner 257.63, 73.2 % of the canvas
+across. It has no strokes at all — Icon Composer flattens a stroked shape to the whole
+region its outline encloses, which turns the ring into a solid disc — so the ring is an
+even-odd annulus of two circles.
+
 The plate outline is a superellipse `|x/412|^5 + |y/412|^5 = 1`, not a rounded rectangle:
 Apple's corner is continuous-curvature and an `rx` rect reads visibly rounder beside stock
-icons. Four cubics per quadrant track it to within 0.14 px at 1024.
+icons. Four cubics per quadrant track it to within 0.14 px at 1024. That it is the right
+curve is checkable rather than asserted — rendered at 256 and compared against the mask
+macOS 26 draws for its own apps, the alpha channels differ by 0.7 % on average and by more
+than half a level on 23 pixels out of 65 536, all of them on the corner's antialiased edge.
+The `.icon` has no plate to get right; only the `.icns` and the window icon need this one.
