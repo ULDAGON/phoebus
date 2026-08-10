@@ -1,0 +1,53 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/phoebus-core",
+    "crates/phoebus-audio",
+    "crates/phoebus-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.95"
+
+[workspace.dependencies]
+phoebus-core = { path = "crates/phoebus-core" }
+phoebus-audio = { path = "crates/phoebus-audio" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+crossbeam-channel = "0.5"
+walkdir = "2"
+lofty = "0.24"
+rodio = { version = "0.22", default-features = false, features = [
+    "playback",
+    "mp4",
+    "mp3",
+    "flac",
+    "vorbis",
+    "wav",
+    "symphonia-aiff",
+    "symphonia-alac",
+] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# glow renderer is REQUIRED: ViewportCommand::Screenshot never completes under wgpu on macOS
+eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
+egui = "0.36"
+egui_extras = "0.36"
+rand = "0.9"
+# OS media keys + now-playing (macOS Control Center / MPRIS). Defaults = ["use_dbus"];
+# the dbus crates are target-gated to non-mac unix, so macOS/Windows never build them.
+souvlaki = "0.8.3"
+log = "0.4"
+env_logger = "0.11"
+dirs = "6"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+# keep audio decode fast in dev builds
+[profile.dev.package."*"]
+opt-level = 2

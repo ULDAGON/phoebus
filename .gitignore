@@ -1,0 +1,8 @@
+target/
+.DS_Store
+
+# local/private — not for the public repo
+.superpowers/
+docs/
+.claude/
+TODOS.md

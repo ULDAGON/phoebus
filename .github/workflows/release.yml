@@ -1,0 +1,82 @@
+name: release
+
+# Build downloadable apps for a version tag:
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Artifacts attached to the GitHub release:
+#   Phoebus-macos-universal.zip   Phoebus.app (arm64 + x86_64 universal binary)
+#   phoebus-linux-x86_64.tar.gz   binary + .desktop + icons
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build universal binary
+        run: |
+          cargo build --release -p phoebus-app --target aarch64-apple-darwin
+          cargo build --release -p phoebus-app --target x86_64-apple-darwin
+          mkdir -p target/release
+          lipo -create \
+            target/aarch64-apple-darwin/release/phoebus \
+            target/x86_64-apple-darwin/release/phoebus \
+            -output target/release/phoebus
+
+      - name: Bundle Phoebus.app
+        run: |
+          scripts/bundle-macos.sh --skip-build
+          # ad-hoc signature so the universal binary launches on Apple silicon
+          codesign --force --deep -s - target/bundle/Phoebus.app
+          ditto -c -k --keepParent target/bundle/Phoebus.app Phoebus-macos-universal.zip
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: Phoebus-macos-universal.zip
+          fail_on_unmatched_files: true
+          body_path: .github/release-notes.md
+
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev libdbus-1-dev libxkbcommon-dev libwayland-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release -p phoebus-app
+
+      - name: Package tarball
+        run: |
+          staging=phoebus-linux-x86_64
+          mkdir -p "$staging/icons"
+          cp target/release/phoebus "$staging/"
+          cp assets/linux/phoebus.desktop "$staging/"
+          cp -r assets/icon/hicolor "$staging/icons/"
+          tar czf "$staging.tar.gz" "$staging"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: phoebus-linux-x86_64.tar.gz
+          fail_on_unmatched_files: true
+          body_path: .github/release-notes.md

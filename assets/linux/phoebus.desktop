@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Phoebus
+GenericName=Music Player
+Comment=A local music player that works like Apple Music and looks like a terminal
+Exec=phoebus
+Icon=phoebus
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=music;audio;player;library;
+StartupNotify=true
+StartupWMClass=phoebus

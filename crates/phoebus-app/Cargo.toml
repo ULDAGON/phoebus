@@ -1,0 +1,49 @@
+[package]
+name = "phoebus-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "phoebus"
+path = "src/main.rs"
+
+[dependencies]
+phoebus-core.workspace = true
+phoebus-audio.workspace = true
+eframe.workspace = true
+egui.workspace = true
+egui_extras.workspace = true
+image.workspace = true
+crossbeam-channel.workspace = true
+souvlaki = { workspace = true }
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+
+# The Dock icon of an unbundled binary (`cargo run`) can only be set through AppKit —
+# eframe's viewport icon is a *window* icon and macOS has no such thing. winit already
+# links both crates, so this costs no extra compilation; the feature list is the minimum
+# `NSApplication::setApplicationIconImage` needs and is unioned with winit's anyway.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSImage",
+    "NSResponder",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSData",
+] }
+
+# eframe's wayland/x11 features do not forward winit's defaults; without these the
+# Linux binary hard-links libwayland-client and loses adwaita window frames on GNOME.
+[target.'cfg(target_os = "linux")'.dependencies]
+winit = { version = "0.30.13", default-features = false, features = [
+    "wayland",
+    "x11",
+    "wayland-dlopen",
+    "wayland-csd-adwaita",
+] }
