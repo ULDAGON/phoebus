@@ -7,10 +7,11 @@
     body fills 80.5 % of the canvas and the rest is transparent margin) carrying the mark
     from assets/icon/reference.jpg.
 
-    The plate outline is a superellipse |x/412|^5 + |y/412|^5 = 1 rather than a rounded
-    rect: Apple's corner is continuous-curvature, and an `rx` rectangle reads visibly
-    "rounder" next to stock icons in the Dock. Four cubics per quadrant track the
-    superellipse to within 0.14 px at 1024 (scripts/make-icons.sh documents the fit).
+    The plate outline is traced from the mask macOS 26 composites for its own apps
+    (IconServices' 1024 px render of Music.app, alpha edge sampled at sub-pixel precision,
+    the four corners folded together): eight cubics per corner through the measured
+    boundary, straight edges between. A superellipse reads visibly rounder at the corner
+    shoulders next to stock icons — assets/README.md documents the measurement.
 
     Mark geometry is the reference bitmap's, expressed against the 824 plate:
       ring   outer diameter 86.2 %, stroke 13.5 %  ->  r 299.52, stroke-width 111.24
@@ -22,7 +23,7 @@
   -->
 
   <defs>
-    <path id="plate" d="M 924 512 C 924 555.06 924.46 649.42 922.48 697.19 C 918.48 793.7 901.71 839.62 870.67 870.67 C 839.62 901.71 793.7 918.48 697.19 922.48 C 649.42 924.46 555.06 924 512 924 C 468.94 924 374.58 924.46 326.81 922.48 C 230.3 918.48 184.38 901.71 153.33 870.67 C 122.29 839.62 105.52 793.7 101.52 697.19 C 99.54 649.42 100 555.06 100 512 C 100 468.94 99.54 374.58 101.52 326.81 C 105.52 230.3 122.29 184.38 153.33 153.33 C 184.38 122.29 230.3 105.52 326.81 101.52 C 374.58 99.54 468.94 100 512 100 C 555.06 100 649.42 99.54 697.19 101.52 C 793.7 105.52 839.62 122.29 870.67 153.33 C 901.71 184.38 918.48 230.3 922.48 326.81 C 924.46 374.58 924 468.94 924 512 Z"/>
+    <path id="plate" d="M 100.00 361.52 C 100.00 344.84 100.69 328.14 102.20 311.53 C 103.73 294.77 105.13 277.88 109.08 261.53 C 113.14 244.72 117.93 227.76 126.13 212.54 C 135.91 194.38 147.87 177.04 162.45 162.45 C 177.04 147.87 194.38 135.91 212.54 126.13 C 227.76 117.93 244.72 113.14 261.53 109.08 C 277.88 105.13 294.77 103.73 311.53 102.20 C 328.14 100.69 344.84 100.00 361.52 100.00 L 662.48 100.00 C 679.16 100.00 695.86 100.69 712.47 102.20 C 729.23 103.73 746.12 105.13 762.47 109.08 C 779.28 113.14 796.24 117.93 811.46 126.13 C 829.62 135.91 846.96 147.87 861.55 162.45 C 876.13 177.04 888.09 194.38 897.87 212.54 C 906.07 227.76 910.86 244.72 914.92 261.53 C 918.87 277.88 920.27 294.77 921.80 311.53 C 923.31 328.14 924.00 344.84 924.00 361.52 L 924.00 662.48 C 924.00 679.16 923.31 695.86 921.80 712.47 C 920.27 729.23 918.87 746.12 914.92 762.47 C 910.86 779.28 906.07 796.24 897.87 811.46 C 888.09 829.62 876.13 846.96 861.55 861.55 C 846.96 876.13 829.62 888.09 811.46 897.87 C 796.24 906.07 779.28 910.86 762.47 914.92 C 746.12 918.87 729.23 920.27 712.47 921.80 C 695.86 923.31 679.16 924.00 662.48 924.00 L 361.52 924.00 C 344.84 924.00 328.14 923.31 311.53 921.80 C 294.77 920.27 277.88 918.87 261.53 914.92 C 244.72 910.86 227.76 906.07 212.54 897.87 C 194.38 888.09 177.04 876.13 162.45 861.55 C 147.87 846.96 135.91 829.62 126.13 811.46 C 117.93 796.24 113.14 779.28 109.08 762.47 C 105.13 746.12 103.73 729.23 102.20 712.47 C 100.69 695.86 100.00 679.16 100.00 662.48 Z"/>
 
     <!-- A few per cent lighter at the top: enough to stop the plate reading as a flat
          sticker in the Dock, not enough to turn a flat brand into a gradient. -->

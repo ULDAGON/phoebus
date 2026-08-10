@@ -103,10 +103,11 @@ shapes re-drawn from those measurements, which is why the geometry can be stated
 fractions at all.
 
 Geometry, as fractions of the plate (or of the whole canvas, for the full-bleed variant):
-ring outer diameter 86.2 % with a 13.5 % stroke; the play triangle equilateral with a
-32.63 % circumradius and 2.95 % corner radius, its centroid nudged 1.28 % left of the ring
-centre. That last nudge is the reference's, and it is what puts the apex just short of the
-ring while the two left corners kiss it.
+ring outer diameter 86.2 % with a 13.5 % stroke; the play triangle equilateral with corner
+radius 10 % of the ring's inner radius, inscribed in the inner circle — the three corner
+arcs sit on the `r_inner − r_corner` circle about the ring centre, so each is exactly
+tangent to the ring and all three corners kiss it. The reference measures the same tangency
+(corner reach 309.2 vs inner radius 308.5 on its 1043 px canvas).
 
 `Assets/mark.svg` is that mark after the 0.85 shrink the other two apply with a transform,
 baked into the path data instead: outer radius 375.14, inner 257.63, 73.2 % of the canvas
@@ -114,10 +115,12 @@ across. It has no strokes at all — Icon Composer flattens a stroked shape to t
 region its outline encloses, which turns the ring into a solid disc — so the ring is an
 even-odd annulus of two circles.
 
-The plate outline is a superellipse `|x/412|^5 + |y/412|^5 = 1`, not a rounded rectangle:
-Apple's corner is continuous-curvature and an `rx` rect reads visibly rounder beside stock
-icons. Four cubics per quadrant track it to within 0.14 px at 1024. That it is the right
-curve is checkable rather than asserted — rendered at 256 and compared against the mask
-macOS 26 draws for its own apps, the alpha channels differ by 0.7 % on average and by more
-than half a level on 23 pixels out of 65 536, all of them on the corner's antialiased edge.
+The plate outline is traced from macOS 26 itself, not drawn from a formula: the mask the
+system composites for its own apps (IconServices' 1024 px render of Music.app) was sampled
+at sub-pixel precision along its alpha edge, the four corners folded together for noise,
+and the corner rebuilt as eight cubics through the measured boundary with straight edges
+between. A superellipse `|x/412|^5 + |y/412|^5 = 1` — the previous outline — agrees at the
+45° point but carries visibly more material at the corner shoulders, which is exactly where
+it read "rounder" than the neighbours in a Dock. Re-rasterised at 1024, the fitted path
+disagrees with the system mask only on isolated antialiased edge pixels.
 The `.icon` has no plate to get right; only the `.icns` and the window icon need this one.
