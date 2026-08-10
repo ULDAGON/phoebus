@@ -5,6 +5,12 @@ terminal: pure black, mono type, one neon-yellow accent. Written entirely in Rus
 
 No streaming, no accounts, no network. Your files, played fast.
 
+![An album page mid-playback: track list on the left, the Up Next queue on the right, the player bar seeked to 0:30](assets/screenshots/playing.png)
+
+| ![The Albums grid, with a Favorites section above All Albums](assets/screenshots/albums.png) | ![A playlist with a four-tile mosaic cover](assets/screenshots/playlist.png) |
+|:--:|:--:|
+| ![The three-pane Artists browser](assets/screenshots/artists.png) | ![The sortable Songs table](assets/screenshots/songs.png) |
+
 ## Install
 
 Grab the latest build from [Releases](https://github.com/ferriskleier/phoebus/releases) —
