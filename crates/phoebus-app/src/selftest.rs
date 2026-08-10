@@ -91,6 +91,7 @@ pub fn run() -> i32 {
     check_albums(&mut report, &library);
     check_audio(&mut report, &library);
     check_playlists(&mut report, &library);
+    check_reorder(&mut report, &library);
     check_add_songs(&mut report, &library);
     check_favorites(&mut report, &library);
     check_state(&mut report);
@@ -445,6 +446,69 @@ fn check_playlists(report: &mut Report, library: &Library) {
             ids.len(),
             path.display()
         ),
+    );
+    cleanup(&dir);
+}
+
+/// Drag the last song of a real playlist to the top, and check that the new order is on
+/// disk — the whole of the playlist reorder gesture below the pointer.
+///
+/// The two calls are exactly the ones the view makes on a drop: `move_target` turns the gap
+/// the row was released into (`0` — above everything) into a `move_entry` index, and
+/// `move_entry` writes. What this adds over the unit tests is the reload: a reorder that
+/// only happened in memory looks perfect until the app is restarted, which is precisely the
+/// failure a headless check can catch and a screenshot cannot.
+fn check_reorder(report: &mut Report, library: &Library) {
+    let dir = match scratch("reorder") {
+        Ok(dir) => dir,
+        Err(e) => {
+            report.check(false, "playlists.reorder", &e);
+            return;
+        }
+    };
+    let ids: Vec<TrackId> = library.tracks_sorted().iter().copied().take(3).collect();
+    if ids.len() < 2 {
+        report.check(false, "playlists.reorder", "the library has too few tracks");
+        cleanup(&dir);
+        return;
+    }
+    let path = Dirs::at(&dir).playlists_path();
+    let mut store = PlaylistStore::load_from(&path);
+    let outcome = store
+        .create(Some("Reorder"))
+        .and_then(|id| store.append_tracks(id, library, &ids).map(|()| id));
+    let id = match outcome {
+        Ok(id) => id,
+        Err(e) => {
+            report.check(false, "playlists.reorder", &format!("create: {e:#}"));
+            cleanup(&dir);
+            return;
+        }
+    };
+
+    let last = ids.len() - 1;
+    let moved = phoebus_core::playlists::move_target(last, 0)
+        .ok_or_else(|| "the top gap was reported as a no-op".to_string())
+        .and_then(|to| store.move_entry(id, last, to).map_err(|e| format!("{e:#}")));
+    let mut want: Vec<TrackId> = ids.clone();
+    want.rotate_right(1);
+    let reloaded = PlaylistStore::load_from(&path).resolve(id, library) == want;
+
+    // …and the drop that goes nowhere writes nowhere: `move_target` refuses both gaps that
+    // touch the dragged row, which is what keeps an aimless drag out of `playlists.json`.
+    let no_op = phoebus_core::playlists::move_target(0, 0).is_none()
+        && phoebus_core::playlists::move_target(0, 1).is_none();
+
+    report.check(
+        moved.is_ok() && reloaded && no_op,
+        "playlists.reorder",
+        &match moved {
+            Ok(()) => format!(
+                "dragged song {last} to the top of {} and reloaded it (order {reloaded}, no-op guard {no_op})",
+                path.display()
+            ),
+            Err(e) => format!("move: {e}"),
+        },
     );
     cleanup(&dir);
 }

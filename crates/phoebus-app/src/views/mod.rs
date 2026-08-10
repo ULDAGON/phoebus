@@ -94,12 +94,20 @@ pub fn route(
     }
 }
 
-/// 24 px padding around a view's content.
+/// 24 px padding around a view's content, and [`theme::SCROLL_GAP`] between anything that
+/// scrolls inside it and its scrollbar.
+///
+/// The gap is set here, on the one `Ui` every view is built in, rather than at each
+/// `ScrollArea`: a row is allocated across `ui.available_width()`, which egui has already
+/// shortened by what the bar reserves, so one number insets the right end of every row in
+/// every list — including the hover/selection highlight, which is the row rect — and a view
+/// that grows a new list inherits it without knowing about any of this.
 pub fn page(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     egui::Frame::new()
         .inner_margin(Margin::same(theme::VIEW_PAD as i8))
         .show(ui, |ui| {
             ui.set_min_size(ui.available_size());
+            ui.spacing_mut().scroll.bar_inner_margin = theme::SCROLL_GAP;
             add(ui);
         });
 }
@@ -402,19 +410,22 @@ mod tests {
         );
     }
 
-    /// UI-SPEC v1.3 §Favorites, on the real widget tree: the view lays out populated as
-    /// well as empty, its `PLAY` hands the queue the favourites list *in `tracks_sorted`
-    /// order*, and the hearted album is pinned to the front of the Albums grid.
+    /// UI-SPEC §Favorites, on the real widget tree: the view lays out populated as well as
+    /// empty, its `PLAY` hands the queue the favourites list *in `tracks_sorted` order*, and
+    /// the Albums view puts the hearted album in a `FAVORITES` section without taking it out
+    /// of the grid.
     ///
     /// Both halves are here because they are the two places a favourite changes what is on
     /// screen, and both go through the same `ViewState` caches — which is the part a
-    /// per-view unit test cannot see.
+    /// per-view unit test cannot see. Laying `View::Albums` out at all is half the point of
+    /// the second half: the sectioned layout draws the hearted album twice, and two cards for
+    /// one album is exactly the shape an egui id clash takes.
     #[test]
-    fn the_favorites_view_and_the_pinned_albums_grid_render() {
+    fn the_favorites_view_and_the_sectioned_albums_grid_render() {
         let lib = library();
         let mut favs = crate::nav::test_favorites();
         // Hearted out of order, and the second album rather than the first: the view has to
-        // re-sort, and the pin has to be visible as a *move*.
+        // re-sort, and a section that merely echoed the click would show the wrong album.
         let ids = lib.tracks_sorted();
         favs.toggle_track(&lib, ids[3]);
         favs.toggle_track(&lib, ids[0]);
@@ -432,9 +443,13 @@ mod tests {
             "the rows and the PLAY context are in library order, not click order"
         );
         assert_eq!(
-            phoebus_core::pinned_albums(&lib, &favs).first(),
-            Some(&second),
-            "the hearted album did not reach the front of the grid"
+            st.albums.section(),
+            std::slice::from_ref(&second),
+            "the FAVORITES section is not the one hearted album"
+        );
+        assert!(
+            lib.albums().len() > 1 && lib.albums().contains(&second),
+            "…and ALL ALBUMS below it is still the whole library, that album included"
         );
 
         // And once the favourites are gone the view falls back to its empty state — the

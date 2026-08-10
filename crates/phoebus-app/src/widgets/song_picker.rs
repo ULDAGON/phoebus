@@ -248,6 +248,9 @@ fn list(
         return;
     }
     ui.spacing_mut().item_spacing.y = 0.0;
+    // The modal is its own layer, not a `views::page`, so it sets the row-to-scrollbar gap
+    // itself — the duration sits on the row's right edge here, with no `⋯` after it.
+    ui.spacing_mut().scroll.bar_inner_margin = theme::SCROLL_GAP;
     egui::ScrollArea::vertical()
         .id_salt(ROWS_ID)
         .auto_shrink([false, false])

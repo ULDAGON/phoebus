@@ -604,6 +604,20 @@ pub const PANEL_PAD: f32 = 14.0;
 /// Indent of a sidebar item under its section label (UI-SPEC v1.2 §Sidebar sections).
 pub const SECTION_INDENT: f32 = 12.0;
 
+/// Air between a scrolling list's content and its scrollbar (`spacing.scroll.bar_inner_margin`).
+///
+/// egui reserves `bar_inner_margin + bar_width` on the scrolling edge and paints the bar in
+/// the outer `bar_width` of that, so this IS the gap the eye reads between a row's last
+/// column — the `⋯` button, a duration — and the bar; raising it moves the bar not at all
+/// and shortens the row instead. The 2 px [`install`] leaves is egui's own margin between
+/// two adjacent widgets, which is not what the end of a 40 px row against a scrollbar is.
+///
+/// Set on the surfaces that hold lists ([`crate::views::page`], the Up Next drawer, the
+/// add-songs picker) rather than in [`install`]: it shortens every row on the surface,
+/// hover highlight included, which is a list metric and not a property of every scroller in
+/// the window.
+pub const SCROLL_GAP: f32 = 12.0;
+
 /// Extra space above the sidebar's wordmark, under which the macOS traffic lights float.
 ///
 /// The window has no titlebar of its own (UI-SPEC v1.2 §Window chrome): the content view is
@@ -769,6 +783,16 @@ pub const HIT_MIN: f32 = 24.0;
 pub const FAKE_BOLD: f32 = 0.5;
 /// Width of the ACCENT bar marking an active nav row.
 pub const ACTIVE_BAR_W: f32 = 2.0;
+/// How far the sidebar's active bar sits in from the window edge.
+///
+/// The bar is drawn at `rect.left() - PANEL_PAD`, i.e. flush with the sidebar panel's outer
+/// edge — and the sidebar is the leftmost panel, so that is x = 0 of the window. A 2 px mark
+/// with nothing to its left does not read as a mark *in* the window, it reads as one that
+/// has been cut off by it. This is the whole inset: small enough that the bar still belongs
+/// to the window's edge rather than to the label, big enough that the edge is visible past
+/// it. Only [`crate::app`]'s sidebar needs it — `views::artists`' equivalent bar already
+/// sits inside an inset content rect.
+pub const ACTIVE_BAR_INSET: f32 = 4.0;
 
 /// Corner radius of cards and buttons (panels stay square).
 pub const CORNER: u8 = 2;

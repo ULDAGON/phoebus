@@ -23,7 +23,7 @@ pub fn grid(ui: &mut Ui, cx: &mut Ctx, keys: &[AlbumKey], id_salt: &str) {
     if keys.is_empty() {
         return;
     }
-    let m = metrics(ui);
+    let m = fitted(ui, keys.len());
     let rows = keys.len().div_ceil(m.columns);
 
     // `show_rows` reads `item_spacing` from *this* ui before it ever runs the closure, and
@@ -50,7 +50,9 @@ pub fn grid_inline(ui: &mut Ui, cx: &mut Ctx, keys: &[AlbumKey]) {
     if keys.is_empty() {
         return;
     }
-    let m = metrics(ui);
+    // The width as given: this grid has no scroll area of its own, so whatever reservation
+    // the outer scroller makes is already out of `available_width`.
+    let m = metrics(ui, ui.available_width());
     let rows = keys.len().div_ceil(m.columns);
     ui.spacing_mut().item_spacing = Vec2::new(theme::GRID_GUTTER, 0.0);
     for r in 0..rows {
@@ -68,9 +70,31 @@ struct Metrics {
     card_h: f32,
 }
 
-/// Fit as many minimum-width cards as the width allows, then stretch them to share it.
-fn metrics(ui: &Ui) -> Metrics {
-    let available = ui.available_width();
+/// [`metrics`] for [`grid`], measured against the width its own `ScrollArea` will hand the
+/// cards rather than against the width of the space the scroll area occupies.
+///
+/// The two differ by `scroll.allocated_width()` — the gap plus the bar — which egui takes out
+/// of the scroller's INNER rect and adds back onto its outer one. Lay the cards out at the
+/// full width and the outer rect grows past the page's 24 pt margin by exactly that, putting
+/// this grid's scrollbar somewhere no other view's is (`views::page` raised the gap to
+/// [`theme::SCROLL_GAP`], which made the offset large enough to see).
+///
+/// Reserved only when a bar is actually coming: egui reserves nothing while the content fits,
+/// and a grid that subtracted regardless would leave 20 pt of dead page beside a short
+/// library. So the fit is measured once at the full width, and re-measured only if the cards
+/// it produces are taller than the room there is for them.
+fn fitted(ui: &Ui, count: usize) -> Metrics {
+    let full = ui.available_width();
+    let m = metrics(ui, full);
+    let rows = count.div_ceil(m.columns);
+    if rows as f32 * (m.card_h + theme::GRID_GUTTER) <= ui.available_height() {
+        return m;
+    }
+    metrics(ui, full - ui.spacing().scroll.allocated_width())
+}
+
+/// Fit as many minimum-width cards as `available` allows, then stretch them to share it.
+fn metrics(ui: &Ui, available: f32) -> Metrics {
     let columns =
         (((available + theme::GRID_GUTTER) / (theme::CARD_W + theme::GRID_GUTTER)).floor()
             as usize)

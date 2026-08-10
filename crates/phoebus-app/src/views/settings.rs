@@ -11,6 +11,9 @@
 //!   and `RESET` back to the default yellow. Every change applies on the next frame and is
 //!   saved.
 //!
+//! Under both, pinned below the scroll area rather than inside it, sits the build stamp
+//! ([`VERSION`]) in the bottom-right corner.
+//!
 //! The view owns none of this: it raises [`Action::Rescan`], [`Action::SetLibraryRoot`],
 //! [`Action::SetThemeMode`] and [`Action::SetAccent`], and the app decides what happens —
 //! including whether the typed path is a directory at all, which is why the error flag lives
@@ -41,6 +44,10 @@ const SWATCH: f32 = 24.0;
 const SWATCH_GAP: f32 = 8.0;
 /// Outline drawn around the swatch that is currently in use.
 const SWATCH_ACTIVE_W: f32 = 2.0;
+
+/// The build stamp: `v` and the workspace version, baked in at compile time so a screenshot
+/// of Settings always names the build it came from.
+const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 
 /// What the Settings view remembers between frames.
 ///
@@ -90,15 +97,42 @@ impl Info<'_> {
 /// Draw the view.
 pub fn show(ui: &mut Ui, cx: &mut Ctx, st: &mut State, info: &Info) {
     views::page(ui, |ui| {
+        // The stamp is taken out of the height BEFORE the scroll area rather than drawn
+        // inside it: reserving the strip is what pins the line to the bottom-right corner
+        // whether the settings fit or scroll, and what stops it ever landing on `RESCAN` or
+        // a swatch on a `WINDOW_MIN`-tall window.
+        let stamp = stamp_height(ui);
+        let scroll_h = (ui.available_height() - stamp - ui.spacing().item_spacing.y).max(0.0);
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
+            .max_height(scroll_h)
             .show(ui, |ui| {
                 views::heading(ui, "SETTINGS");
                 library_section(ui, cx, st, info);
                 ui.add_space(theme::SECTION_GAP);
                 theme_section(ui, cx);
             });
+        version_stamp(ui, stamp);
     });
+}
+
+/// The strip [`version_stamp`] needs: one Small line, plus the air that keeps it off the
+/// content above.
+fn stamp_height(ui: &Ui) -> f32 {
+    theme::CARD_TEXT_GAP + ui.text_style_height(&egui::TextStyle::Small)
+}
+
+/// [`VERSION`] in Small `TEXT_LOW`, flush with the bottom-right corner of the reserved
+/// strip. Not a widget: it says nothing the user can act on, so it senses nothing.
+fn version_stamp(ui: &mut Ui, height: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
+    let color = theme::p().text_low;
+    let galley = widgets::truncated(ui, VERSION, theme::font_small(), color, rect.width());
+    let pos = egui::pos2(
+        rect.right() - galley.size().x,
+        rect.bottom() - galley.size().y,
+    );
+    ui.painter().galley(pos, galley, color);
 }
 
 fn library_section(ui: &mut Ui, cx: &mut Ctx, st: &mut State, info: &Info) {
@@ -373,6 +407,21 @@ mod tests {
             phoebus_core::format_hex_color(PRESETS[0].1),
             phoebus_core::DEFAULT_ACCENT
         );
+    }
+
+    /// The stamp is a compile-time `concat!`, so the only thing that can go wrong is the
+    /// shape: a leading `v` and the three numeric components of the workspace version.
+    #[test]
+    fn the_version_stamp_reads_as_a_version() {
+        let digits = VERSION.strip_prefix('v').expect("no leading v");
+        let parts: Vec<&str> = digits.split('.').collect();
+        assert_eq!(parts.len(), 3, "{VERSION} is not major.minor.patch");
+        for part in parts {
+            assert!(
+                part.starts_with(|c: char| c.is_ascii_digit()),
+                "{VERSION} has a non-numeric component"
+            );
+        }
     }
 
     #[test]

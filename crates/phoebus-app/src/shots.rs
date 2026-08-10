@@ -144,7 +144,8 @@ pub const DEMO_PLAYLIST_LEN: usize = 8;
 /// view has rows, not that it is full.
 ///
 /// The albums are hearted from index 1, never index 0 — `albums.png` is shot before
-/// `favorites.png`, and pinning the album that was already first would prove nothing.
+/// `favorites.png`, and hearting the grid's own first album would make its FAVORITES-
+/// section copy indistinguishable from the grid's first card in the shot.
 pub const DEMO_FAV_ALBUMS: std::ops::Range<usize> = 1..3;
 /// Which tracks of each demo-favourite album get a heart. Includes album 0's, which is the
 /// tracklist `album.png` and `playing.png` photograph — so the heart column is visible

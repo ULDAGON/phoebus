@@ -26,6 +26,10 @@ pub fn drawer(ui: &mut Ui, cx: &mut Ctx, items: &[UpNext]) {
     }
 
     ui.spacing_mut().item_spacing.y = 0.0;
+    // The drawer is a side panel, not a `views::page`, so the gap between a row's right end
+    // and the scrollbar is set here instead of inherited. The header above stays on the
+    // panel's own edge: it is outside the scroller, and nothing in a row is right-aligned.
+    ui.spacing_mut().scroll.bar_inner_margin = theme::SCROLL_GAP;
     egui::ScrollArea::vertical()
         .id_salt("queue-rows")
         .auto_shrink([false, false])

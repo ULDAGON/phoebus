@@ -289,6 +289,10 @@ impl PlaylistStore {
     }
 
     /// Move the entry at `from` to `to` (reorder). `to` is clamped to the last position.
+    ///
+    /// `to` is the index the entry ends up **at**, which is not the same thing as the gap a
+    /// drag-and-drop gesture drops into — see [`move_target`] for the conversion. Moving an
+    /// entry onto its own index is a no-op that touches neither `modified_at` nor the file.
     pub fn move_entry(&mut self, id: u64, from: usize, to: usize) -> Result<()> {
         let p = self.get_mut(id)?;
         if from >= p.entries.len() {
@@ -331,6 +335,33 @@ impl PlaylistStore {
             .find(|p| p.id == id)
             .ok_or_else(|| anyhow!("no playlist with id {id}"))
     }
+}
+
+/// Translate a drag-and-drop **insertion slot** into the `to` index
+/// [`PlaylistStore::move_entry`] takes, or `None` when the drop would change nothing.
+///
+/// A reorder gesture names a *gap*, not a row. `before` is the gap the dragged entry was
+/// released into: `0` is above the first entry, `len` is past the last, and gap `n` in
+/// between means "immediately above the entry currently at `n`". `move_entry` instead names
+/// the index the entry ends up **at**, and the two differ by one for every downward move,
+/// because the entry is lifted out before it is put back and everything after it shifts up.
+/// Getting this wrong is invisible for upward drags and off by exactly one row for downward
+/// ones, which is why it is a named function with a truth table rather than an `if` at a
+/// call site.
+///
+/// The two gaps that touch the dragged entry's own edges — `from` (dropped just above
+/// itself) and `from + 1` (just below) — describe the order the playlist already has. They
+/// are reported as `None` so a drag that went nowhere costs no `playlists.json` write and
+/// no `modified_at` bump; a single-entry playlist has only those two gaps, so it can never
+/// be dirtied by a drag at all.
+///
+/// `before` may exceed `len` — a drop below the last row clamps in
+/// [`PlaylistStore::move_entry`], which is the one place that knows `len`.
+pub fn move_target(from: usize, before: usize) -> Option<usize> {
+    if before == from || before == from + 1 {
+        return None;
+    }
+    Some(if before > from { before - 1 } else { before })
 }
 
 fn now_secs() -> u64 {
@@ -440,6 +471,124 @@ mod tests {
             reloaded.get(id).expect("pl").entries,
             store.get(id).expect("pl").entries
         );
+    }
+
+    /// [`move_target`]'s truth table: a drag drops into a GAP, and the two gaps either side
+    /// of the dragged row are the order the playlist already has.
+    #[test]
+    fn a_drop_gap_becomes_a_move_index_or_nothing_at_all() {
+        // Downward: the gap is one past the index the entry lands on, because it is lifted
+        // out first and everything behind it shifts up.
+        assert_eq!(move_target(0, 2), Some(1));
+        assert_eq!(move_target(0, 3), Some(2), "dropped past the last row of 3");
+        assert_eq!(move_target(1, 4), Some(3));
+        // Upward: nothing in front of the entry moves, so the gap IS the index.
+        assert_eq!(move_target(2, 0), Some(0));
+        assert_eq!(move_target(3, 1), Some(1));
+        // Its own two edges: no move, and therefore no write.
+        assert_eq!(move_target(2, 2), None);
+        assert_eq!(move_target(2, 3), None);
+        // A one-song playlist has exactly those two gaps and nothing else.
+        assert_eq!(move_target(0, 0), None);
+        assert_eq!(move_target(0, 1), None);
+    }
+
+    /// Every gap of a four-entry playlist, driven through the real store, against the
+    /// definition of the gesture: lift the entry out, put it back where the gap was.
+    ///
+    /// This is the drag-and-drop reorder end to end — [`move_target`] then
+    /// [`PlaylistStore::move_entry`] then the file — for all 4 × 5 combinations, so the
+    /// off-by-one cannot hide in the half of them that happen to agree.
+    #[test]
+    fn every_drop_gap_reorders_the_way_the_gesture_reads() {
+        let order = [
+            "HOME/Odyssey/01 Intro.m4a",
+            "HOME/Odyssey/02 Resonance.m4a",
+            "Woodkid/S16/01 Goliath.m4a",
+            "Ghost/Gone/99 Missing.m4a",
+        ];
+        // What the user saw happen: the row leaves the list, then reappears at the gap.
+        let expected = |from: usize, before: usize| -> Vec<String> {
+            let mut v: Vec<String> = order.iter().map(|e| (*e).to_string()).collect();
+            let entry = v.remove(from);
+            v.insert(if before > from { before - 1 } else { before }, entry);
+            v
+        };
+
+        for from in 0..order.len() {
+            for before in 0..=order.len() {
+                let dir = tempfile::tempdir().expect("tempdir");
+                let mut store = PlaylistStore::load_from(&store_path(dir.path()));
+                let id = store.create(Some("Mix")).expect("create");
+                store
+                    .append_paths(id, order.iter().map(|e| (*e).to_string()))
+                    .expect("append");
+
+                match move_target(from, before) {
+                    Some(to) => store.move_entry(id, from, to).expect("move"),
+                    None => assert_eq!(
+                        expected(from, before),
+                        order.iter().map(|e| (*e).to_string()).collect::<Vec<_>>(),
+                        "gap {before} of row {from} was called a no-op but is not one"
+                    ),
+                }
+                assert_eq!(
+                    store.get(id).expect("pl").entries,
+                    expected(from, before),
+                    "row {from} dropped into gap {before}"
+                );
+                // …and it is on disk, not merely in memory: a reorder that is not persisted
+                // is the whole failure mode this gesture has.
+                assert_eq!(
+                    PlaylistStore::load_from(&store_path(dir.path()))
+                        .get(id)
+                        .expect("pl")
+                        .entries,
+                    expected(from, before),
+                    "row {from} into gap {before} did not survive a reload"
+                );
+            }
+        }
+    }
+
+    /// A drag that goes nowhere must not rewrite `playlists.json`.
+    ///
+    /// Proved by deleting the file first: a store that saved would put it back. Comparing
+    /// `modified_at` could not show this — it has one-second resolution, so a spurious save
+    /// inside the same second is indistinguishable from no save at all.
+    #[test]
+    fn a_drop_onto_its_own_position_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = store_path(dir.path());
+        let mut store = PlaylistStore::load_from(&path);
+        let id = store.create(Some("Mix")).expect("create");
+        store
+            .append_paths(
+                id,
+                [
+                    "HOME/Odyssey/01 Intro.m4a".to_string(),
+                    "Woodkid/S16/01 Goliath.m4a".to_string(),
+                ],
+            )
+            .expect("append");
+        let before = store.get(id).expect("pl").clone();
+        std::fs::remove_file(&path).expect("rm");
+
+        store
+            .move_entry(id, 1, 1)
+            .expect("a no-op move is not an error");
+        assert!(
+            !path.exists(),
+            "a reorder onto the row's own position rewrote playlists.json"
+        );
+        assert_eq!(
+            store.get(id).expect("pl"),
+            &before,
+            "…and it must not have bumped modified_at either"
+        );
+        // The out-of-range guard still fires ahead of the no-op check.
+        assert!(store.move_entry(id, 2, 2).is_err());
+        assert!(!path.exists());
     }
 
     /// The add-songs picker's whole contract at this level (UI-SPEC v1.4 §Add songs): the

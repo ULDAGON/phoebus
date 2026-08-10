@@ -579,18 +579,18 @@ impl Phoebus {
     /// Heart / unheart one song. The store saves itself; all this owes it is the two caches
     /// that were derived from the old answer.
     ///
-    /// The Favorites view's rows obviously change. The Albums grid's pinned order does not
-    /// — a *track* is not an album — so it is deliberately left alone: invalidating it here
-    /// would rebuild a 290-key `Vec` on every heart clicked anywhere in the app.
+    /// The Favorites view's rows obviously change. The Albums view's FAVORITES section does
+    /// not — a *track* is not an album, so a track heart cannot change which albums are
+    /// hearted — and its cache is deliberately left alone.
     fn toggle_fav_track(&mut self, id: TrackId) {
         let hearted = self.controller.favorites.toggle_track(&self.library, id);
         log::debug!("favorites: track {id:?} -> {hearted}");
         self.vstate.favorites.invalidate();
     }
 
-    /// Heart / unheart one album. The mirror image: the Albums grid's pinned order changes
-    /// and the Favorites view's rows do not — hearting an album does not heart its songs,
-    /// and UI-SPEC v1.3 lists only songs in that view.
+    /// Heart / unheart one album. The mirror image: the Albums view's FAVORITES section
+    /// changes and the Favorites view's rows do not — hearting an album does not heart its
+    /// songs, and UI-SPEC v1.3 lists only songs in that view.
     fn toggle_fav_album(&mut self, key: &phoebus_core::AlbumKey) {
         let hearted = self.controller.favorites.toggle_album(key);
         log::debug!("favorites: album {key} -> {hearted}");
@@ -1003,7 +1003,7 @@ impl Phoebus {
         log::info!("shot: setting up {step:?}");
         self.tour_reset();
         // Before the first step, not at the Favorites one: `albums.png` is shot long before
-        // `favorites.png` and has to show the pinned order.
+        // `favorites.png` and has to show the FAVORITES section.
         self.seed_demo_favorites();
         match step {
             Step::Recently => self.view = View::RecentlyAdded,
@@ -1418,7 +1418,9 @@ fn section_label(ui: &mut Ui, text: &str) {
 /// otherwise, `TEXT_HI` on hover.
 ///
 /// The whole width stays clickable however far the label is indented, and the active bar
-/// stays welded to the panel edge — it marks the row, not the group.
+/// stays welded to the panel edge — it marks the row, not the group. Welded, not flush:
+/// [`theme::ACTIVE_BAR_INSET`] leaves a sliver of panel to its left so the mark reads as
+/// sitting at the window's edge rather than as running off it.
 fn nav_row(ui: &mut Ui, label: &str, active: bool, kind: Row) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(
         Vec2::new(ui.available_width(), theme::ROW_NAV),
@@ -1432,13 +1434,11 @@ fn nav_row(ui: &mut Ui, label: &str, active: bool, kind: Row) -> egui::Response 
         theme::p().text_mid
     };
     if active {
+        let bar_x = rect.left() - theme::PANEL_PAD + theme::ACTIVE_BAR_INSET;
         ui.painter().rect_filled(
             Rect::from_min_max(
-                egui::pos2(rect.left() - theme::PANEL_PAD, rect.top() + 3.0),
-                egui::pos2(
-                    rect.left() - theme::PANEL_PAD + theme::ACTIVE_BAR_W,
-                    rect.bottom() - 3.0,
-                ),
+                egui::pos2(bar_x, rect.top() + 3.0),
+                egui::pos2(bar_x + theme::ACTIVE_BAR_W, rect.bottom() - 3.0),
             ),
             egui::CornerRadius::ZERO,
             theme::p().accent_text,

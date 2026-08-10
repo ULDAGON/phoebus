@@ -169,7 +169,24 @@ fn table(
     let Header { col, desc, clicked } = header;
     // The row's full x-range, captured before the table takes the `Ui`: a cell only knows
     // its own column, and hovering one column has to light up the whole row.
-    let span = ui.available_rect_before_wrap().x_range();
+    //
+    // Full means the columns, and stops where they do. `egui_extras` lays them out inside its
+    // scroll area, so when a bar is on screen the last column ends `scroll.allocated_width()`
+    // short of the space the table occupies — and a row is *highlighted* per cell, across
+    // exactly those columns. Counting the bar's strip in would leave the pointer lighting up
+    // a row's `▶`, heart and `⋯` with no fill under it and no click to be had, over a strip
+    // `views::page`'s [`theme::SCROLL_GAP`] made 20 px wide.
+    let area = ui.available_rect_before_wrap();
+    let scrolls = theme::ROW_NAV + rows.len() as f32 * widgets::ROW_H > area.height();
+    let span = Rangef::new(
+        area.left(),
+        area.right()
+            - if scrolls {
+                ui.spacing().scroll.allocated_width()
+            } else {
+                0.0
+            },
+    );
     // `egui_extras` puts `item_spacing.y` *between* rows, so the default 6 px would make a
     // 40 px row pitch 46 px and the Songs view would not line up with the other three list
     // views. The columns keep their horizontal spacing.

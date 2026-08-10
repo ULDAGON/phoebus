@@ -289,18 +289,11 @@ impl Favorites {
     }
 }
 
-/// [`Library::albums`] with the hearted albums pinned to the front, each group keeping its
-/// sorted relative order — the Albums view's order, and only that view's (Recently Added
-/// stays purely chronological).
-///
-/// Pure: a favourite that the library does not hold cannot be shown and is simply absent.
-pub fn pinned_albums(library: &Library, favorites: &Favorites) -> Vec<AlbumKey> {
-    let all = library.albums();
-    let mut out: Vec<AlbumKey> = Vec::with_capacity(all.len());
-    out.extend(all.iter().filter(|k| favorites.is_album(k)).cloned());
-    out.extend(all.iter().filter(|k| !favorites.is_album(k)).cloned());
-    out
-}
+// There is no `pinned_albums` here any more. The Albums view used to reorder the whole grid
+// so hearted albums came first; it now leaves the grid in library order and puts a FAVORITES
+// section above it, so the hearted album is in both places at once. Filtering `Library::albums`
+// with [`Favorites::is_album`] is all that takes, and `views::albums::State` does it where it
+// can cache the answer — a `Vec<AlbumKey>` rebuilt per frame was the reason this lived here.
 
 #[cfg(test)]
 mod tests {
@@ -481,8 +474,15 @@ mod tests {
         assert!(fav.is_album(&key("HOME", "Odyssey")));
     }
 
+    /// What the Albums view's `FAVORITES` section is made of, at the source: hearting picks
+    /// albums *out of* `Library::albums` and leaves that list exactly as it was, so the two
+    /// can be drawn one above the other with the hearted album in both.
+    ///
+    /// The section's own business — its order on screen, its cache, and the fact that the
+    /// grid below repeats it — belongs to `views::albums` and is tested there. This is only
+    /// the predicate underneath it, and the guarantee that the predicate is non-destructive.
     #[test]
-    fn hearted_albums_are_pinned_keeping_their_sorted_order() {
+    fn hearting_selects_albums_without_disturbing_the_library_order() {
         let dir = tempfile::tempdir().expect("tempdir");
         let lib = grid_library(dir.path());
         let mut fav = Favorites::load_from(&store_path(dir.path()));
@@ -494,33 +494,38 @@ mod tests {
             key("Gamma", "Dalet"),
         ];
         assert_eq!(lib.albums(), sorted.as_slice(), "the plain Albums order");
-        assert_eq!(
-            pinned_albums(&lib, &fav),
-            sorted,
-            "no favorites: the order is untouched"
-        );
 
-        // Heart the last one first, then a middle one: pinning must use the *library's*
-        // relative order, not the order they were hearted in.
+        let section = |fav: &Favorites| -> Vec<AlbumKey> {
+            lib.albums()
+                .iter()
+                .filter(|k| fav.is_album(k))
+                .cloned()
+                .collect()
+        };
+        assert!(section(&fav).is_empty(), "no favorites, no section");
+
+        // The last one hearted first, then a middle one: the section comes out in the
+        // *library's* relative order, never in the order the hearts were clicked in.
         fav.toggle_album(&key("Gamma", "Dalet"));
         fav.toggle_album(&key("Alpha", "Beth"));
         assert_eq!(
-            pinned_albums(&lib, &fav),
-            vec![
-                key("Alpha", "Beth"),
-                key("Gamma", "Dalet"),
-                key("Alpha", "Aleph"),
-                key("Beta", "Gimel"),
-            ]
+            section(&fav),
+            vec![key("Alpha", "Beth"), key("Gamma", "Dalet")]
+        );
+        assert_eq!(
+            lib.albums(),
+            sorted.as_slice(),
+            "the grid the section was taken from must be untouched"
         );
 
-        // A hearted album this library does not hold cannot be shown.
+        // A hearted album this library does not hold is still stored, and still has no card.
         fav.toggle_album(&key("Ghost", "Nowhere"));
-        assert_eq!(pinned_albums(&lib, &fav).len(), 4);
+        assert_eq!(fav.album_count(), 3);
+        assert_eq!(section(&fav).len(), 2);
 
         fav.toggle_album(&key("Alpha", "Beth"));
         fav.toggle_album(&key("Gamma", "Dalet"));
-        assert_eq!(pinned_albums(&lib, &fav), sorted, "unhearting restores it");
+        assert!(section(&fav).is_empty(), "unhearting empties the section");
     }
 
     #[test]

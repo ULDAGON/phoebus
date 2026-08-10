@@ -313,13 +313,43 @@ pub struct Row {
     pub lead: Lead,
 }
 
+/// x where a [`show`] row's title starts, measured from the row's left edge: the state
+/// column, the gap, the cover, and the cover's own gap.
+///
+/// Exported because the playlist's `+ ADD SONGS` foot row has to line up with the titles
+/// above it, and re-deriving the sum at that call site is how two columns drift apart.
+pub fn title_x(row: Rect) -> f32 {
+    row.left() + widgets::LEAD_W + widgets::LEAD_GAP + widgets::ROW_ART + theme::LCD_PAD + 2.0
+}
+
 /// Draw one playlist / search song row: state column, cover, title over artist, album,
 /// duration, `⋯`.
 ///
 /// The album-detail tracklist is deliberately *not* this row — it shows track numbers and
 /// no artwork, because on an album page the cover is already three inches tall.
 pub fn show(ui: &mut Ui, cx: &mut Ctx, id: TrackId, selected: bool) -> Row {
-    let (rect, response) = widgets::row(ui, widgets::ROW_H, Sense::click());
+    row_with(ui, cx, id, selected, Sense::click())
+}
+
+/// The same row, but it can also be picked up and dragged to a new position.
+///
+/// The extra sense is `Sense::click_and_drag()` rather than a hand-rolled distance
+/// threshold, because that is precisely what egui's own threshold is: with both senses set
+/// it postpones the click-or-drag verdict until the pointer has moved further than
+/// `InputOptions::max_click_dist`, been held longer than `max_click_duration`, or left the
+/// row. Until then the gesture is still a click, so click-to-select, double-click-to-play
+/// and the right-click menu all keep landing as themselves and only a real drag ever
+/// reports [`Response::drag_started`].
+///
+/// Only the playlist asks for this, because only the playlist has an order of its own to
+/// change. Every other list view is derived — sorted, filtered, chronological — and a drop
+/// there would have nowhere to be saved.
+pub fn draggable(ui: &mut Ui, cx: &mut Ctx, id: TrackId, selected: bool) -> Row {
+    row_with(ui, cx, id, selected, Sense::click_and_drag())
+}
+
+fn row_with(ui: &mut Ui, cx: &mut Ctx, id: TrackId, selected: bool, sense: Sense) -> Row {
+    let (rect, response) = widgets::row(ui, widgets::ROW_H, sense);
     let current = cx.now.is_current(id);
     let hovered = ui.rect_contains_pointer(rect);
     widgets::row_background(ui, rect, hovered || selected, false);
@@ -349,7 +379,7 @@ pub fn show(ui: &mut Ui, cx: &mut Ctx, id: TrackId, selected: bool) -> Row {
     let key = track.map(|t| &t.album_key);
     artwork::paint_cover(ui, cx.art, key, art_rect);
 
-    let text_x = art_rect.right() + theme::LCD_PAD + 2.0;
+    let text_x = title_x(rect);
     // UI-SPEC v1.2: the divider starts at the title, not at the state column.
     widgets::hairline_bottom_from(ui, rect, text_x);
 
