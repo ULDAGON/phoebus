@@ -9,8 +9,8 @@
 
     Proportions are assets/icon/reference.jpg's, measured against the whole canvas:
       ring   outer diameter 86.2 %, stroke 13.5 %  ->  r 372.22, stroke-width 138.24
-      play   equilateral, circumradius 32.63 %, corner radius 2.95 %, centroid 1.28 %
-             left of the ring centre.
+      play   equilateral, corner radius 10 % of the ring's inner radius, inscribed in the
+             inner circle (corner arcs exactly tangent to it) — see phoebus.svg for why.
   -->
 
   <defs>
@@ -27,6 +27,6 @@
        tile, so the group is scaled down about the canvas centre (~73 % now). -->
   <g fill="#FEFB54" transform="translate(512 512) scale(0.85) translate(-512 -512)">
     <circle cx="512" cy="512" r="372.22" fill="none" stroke="#FEFB54" stroke-width="138.24"/>
-    <path d="M 377.14 248.79 L 787.71 485.84 A 30.21 30.21 0 0 1 787.71 538.16 L 377.14 775.21 A 30.21 30.21 0 0 1 331.83 749.04 L 331.83 274.96 A 30.21 30.21 0 0 1 377.14 248.79 Z"/>
+    <path d="M 799.94 538.25 L 390.76 774.49 A 30.31 30.31 0 0 1 345.30 748.24 L 345.29 275.76 A 30.31 30.31 0 0 1 390.76 249.51 L 799.94 485.75 A 30.31 30.31 0 0 1 799.94 538.25 Z"/>
   </g>
 </svg>

@@ -14,10 +14,11 @@
 
     Mark geometry is the reference bitmap's, expressed against the 824 plate:
       ring   outer diameter 86.2 %, stroke 13.5 %  ->  r 299.52, stroke-width 111.24
-      play   equilateral, circumradius 32.63 %, corner radius 2.95 %, its centroid
-             nudged 1.28 % left of the ring centre (the reference does the same, which is
-             what puts the apex a hair short of the ring and the two left corners just
-             touching it).
+      play   equilateral, corner radius 10 % of the ring's inner radius, inscribed in the
+             inner circle: the three corner arcs sit on the r_inner - r_corner circle about
+             the ring centre, so each arc is exactly tangent to the ring. All three corners
+             kiss the ring and the gaps read even — the reference measures the same
+             (corner reach 309.2 vs inner radius 308.5 on its 1043 px canvas).
   -->
 
   <defs>
@@ -49,7 +50,7 @@
        about the plate centre (ring outer diameter now ~73 % of the plate). -->
   <g fill="#FEFB54" transform="translate(512 512) scale(0.85) translate(-512 -512)">
     <circle cx="512" cy="512" r="299.52" fill="none" stroke="#FEFB54" stroke-width="111.24"/>
-    <path d="M 403.48 300.2 L 733.86 490.95 A 24.31 24.31 0 0 1 733.86 533.05 L 403.48 723.8 A 24.31 24.31 0 0 1 367.02 702.75 L 367.02 321.25 A 24.31 24.31 0 0 1 403.48 300.2 Z"/>
+    <path d="M 743.71 533.12 L 414.44 723.22 A 24.39 24.39 0 0 1 377.86 702.10 L 377.85 321.90 A 24.39 24.39 0 0 1 414.44 300.78 L 743.70 490.88 A 24.39 24.39 0 0 1 743.71 533.12 Z"/>
   </g>
 
   <use href="#plate" fill="none" stroke="url(#plate-rim)" stroke-width="4" clip-path="url(#plate-clip)"/>

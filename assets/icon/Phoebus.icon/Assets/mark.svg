@@ -10,6 +10,8 @@
     Same geometry as phoebus-square.svg's mark after its 0.85 shrink, baked in rather than
     applied by a transform: ring outer radius 375.14, inner 257.63 (73.3 % of the canvas
     across, which is where Music.app and Podcasts.app put their glyphs on the same grid).
+    The play triangle is inscribed in the inner circle — corner arcs (radius 10 % of the
+    inner radius) exactly tangent to it — matching phoebus.svg.
 
     Every shape is a filled path. Icon Composer flattens a stroked shape to the region its
     outline encloses — the ring drawn as `stroke` on a `circle` renders as a solid disc —
@@ -21,6 +23,6 @@
     <path fill-rule="evenodd"
           d="M 136.86 512 A 375.14 375.14 0 1 0 887.14 512 A 375.14 375.14 0 1 0 136.86 512 Z
              M 254.37 512 A 257.63 257.63 0 1 0 769.63 512 A 257.63 257.63 0 1 0 254.37 512 Z"/>
-    <path d="M 397.37 288.27 L 746.35 489.76 A 25.68 25.68 0 0 1 746.35 534.24 L 397.37 735.73 A 25.68 25.68 0 0 1 358.86 713.48 L 358.86 310.52 A 25.68 25.68 0 0 1 397.37 288.27 Z"/>
+    <path d="M 756.75 534.31 L 408.95 735.11 A 25.76 25.76 0 0 1 370.31 712.81 L 370.30 311.19 A 25.76 25.76 0 0 1 408.94 288.89 L 756.75 489.69 A 25.76 25.76 0 0 1 756.75 534.31 Z"/>
   </g>
 </svg>
