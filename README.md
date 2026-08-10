@@ -5,6 +5,33 @@ terminal: pure black, mono type, one neon-yellow accent. Written entirely in Rus
 
 No streaming, no accounts, no network. Your files, played fast.
 
+## Install
+
+Grab the latest build from [Releases](https://github.com/ferriskleier/phoebus/releases) —
+no toolchain needed.
+
+**macOS** — download `Phoebus-macos-universal.zip`, unzip, move `Phoebus.app` to
+`/Applications` if you like, and open it. The app is not notarised, so the first launch
+is blocked by Gatekeeper: right-click → **Open** once, or
+
+```
+xattr -dr com.apple.quarantine /Applications/Phoebus.app
+```
+
+Works on both Apple silicon and Intel (universal binary).
+
+**Linux** — download `phoebus-linux-x86_64.tar.gz`, unpack, run:
+
+```
+tar xzf phoebus-linux-x86_64.tar.gz
+./phoebus-linux-x86_64/phoebus
+```
+
+Needs ALSA (`libasound2`) and D-Bus at runtime — present on any desktop distro. For a
+launcher entry and icon, copy `phoebus.desktop` into `~/.local/share/applications/` and
+the bundled `icons/hicolor` tree into `~/.local/share/icons/`, with `phoebus` somewhere
+on your `PATH`.
+
 ## Library
 
 Phoebus reads `~/.phoebus/` by default, laid out exactly like Apple Music's media folder:
@@ -95,5 +122,4 @@ real home.
 crates/phoebus-core    library model, scanner, playlists, queue, search  (no UI deps)
 crates/phoebus-audio   playback engine on a dedicated thread (rodio)
 crates/phoebus-app     the egui app
-docs/                  architecture, UI spec, compile-verified API notes
 ```
