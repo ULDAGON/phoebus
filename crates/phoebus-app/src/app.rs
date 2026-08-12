@@ -86,6 +86,9 @@ pub struct Phoebus {
     playlists_all: Vec<Playlist>,
 
     actions: Vec<Action>,
+    /// A normal macOS run hides its window instead of exiting when the red close button is
+    /// pressed. Screenshot runs still need their `ViewportCommand::Close` to terminate.
+    background_on_close: bool,
     shot: Option<Shot>,
     tour: Option<Tour>,
 }
@@ -108,6 +111,7 @@ impl Phoebus {
         // A tour must never be audible, whatever the environment says.
         let touring = matches!(capture, Some(Capture::Tour(_)));
         let controller = Controller::new(dirs.clone(), state, playlists, touring);
+        let background_on_close = capture.is_none();
         let (shot, tour) = match capture {
             Some(Capture::Once(path)) => (Some(Shot::new(path)), None),
             Some(Capture::Tour(dir)) => (None, Some(Tour::new(dir))),
@@ -135,6 +139,7 @@ impl Phoebus {
             demo: None,
             playlists_all: Vec::new(),
             actions: Vec::new(),
+            background_on_close,
             shot,
             tour,
             root,
@@ -160,6 +165,21 @@ impl Phoebus {
         theme::apply(ctx, mode, accent);
         self.controller.set_theme(mode, theme::rgb(accent));
         ctx.request_repaint();
+    }
+
+    /// Keep a normal macOS run alive when its window's red close button is pressed.
+    ///
+    /// AppKit handles `Command-Q` through its `terminate:` action rather than this window
+    /// close request, so quitting still reaches [`Self::on_exit`]. Other platforms retain
+    /// their native close-to-quit behavior, and screenshot runs can still close themselves.
+    fn background_on_macos_close(&self, ctx: &egui::Context) {
+        if !cfg!(target_os = "macos") || !self.background_on_close {
+            return;
+        }
+        if ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
     }
 
     // ---- library scan ----------------------------------------------------------------
@@ -1262,6 +1282,7 @@ fn arm_background_repaint(ctx: &egui::Context, now: Now, scanning: bool) {
 
 impl eframe::App for Phoebus {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.background_on_macos_close(ctx);
         self.artwork.pump(ctx);
         self.poll_scan();
         self.controller.poll(&self.library);

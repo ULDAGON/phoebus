@@ -34,6 +34,7 @@ mod app;
 mod artwork;
 mod controller;
 mod icon;
+mod lifecycle;
 mod media_keys;
 mod nav;
 mod selftest;
@@ -117,6 +118,7 @@ fn main() -> eframe::Result {
             // AppKit has finished launching by now — the right moment to replace the
             // generic Dock icon an unbundled binary gets.
             icon::set_dock_icon();
+            lifecycle::install_reopen_handler(&cc.egui_ctx);
             Ok(Box::new(app::Phoebus::new(cc, dirs, root, state, capture)) as Box<dyn eframe::App>)
         }),
     )?;
