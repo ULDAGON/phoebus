@@ -1,13 +1,9 @@
-## What's new in v0.2
+## What's new in v0.2.1
 
-- A native macOS icon: on macOS 26 the app ships a compiled Icon Composer asset, so the
-  Dock no longer shrinks and re-plates it; the fallback `.icns` plate is traced
-  pixel-accurate from the system's own icon mask.
-- Playlists: drag-and-drop reordering, and **ADD SONGS** moved to the foot of the list.
-- Albums: favorite albums get their own **FAVORITES** section on top while keeping their
-  place in the full grid.
-- Every track list leaves proper breathing room before the scrollbar, the sidebar's accent
-  bar no longer touches the window edge, and Settings shows the app version.
+- On macOS, closing the window with the red button now keeps Phoebus alive in the
+  background. Press **Command+Q** when you want to quit the app completely.
+- The app icon now gives the play symbol more breathing room and uses a near-black
+  background with a subtle blue tint across macOS and Linux.
 
 ## Install
 
