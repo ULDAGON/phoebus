@@ -83,17 +83,19 @@ lets the shell attach a running window to the launcher entry.
 
 ## The artwork
 
-Two colours, sampled from `icon/reference.jpg`: navy `#2A3440` and neon yellow `#FEFB54`.
-The yellow is flat wherever it appears. The navy is not: both SVGs fill their background
-with a vertical gradient from `#303B49` down to `#2A3440` — a few per cent, just enough
-that 1024 px of one colour does not read as dead — and the plate variant adds a hairline
-rim light along its top edge, white at 13 % opacity fading to nothing by mid-height, a 4 px
+Two colours derived from `icon/reference.jpg`: blue-black `#0B121A` and neon yellow `#FEFB54`.
+The background is an almost-black version of the reference navy; the yellow is unchanged
+and flat wherever it appears. The blue-black is not flat: both SVGs fill their background
+with a vertical gradient from `#111A24` down to `#0B121A` — dark enough to read as black,
+with just enough blue tint and tonal movement to keep the field alive — and the plate
+variant adds a hairline rim light along its top edge, white at 13 % opacity fading to
+nothing by mid-height, a 4 px
 stroke clipped to the plate so only its inner half shows. The full-bleed square has the
 gradient and no rim; it has no edge for a light to catch. The yellow is deliberately *not*
 the app's `#FFFB00` accent — the icon is the brand mark, the accent is a UI token, and they
 are allowed to differ.
 
-`icon.json` restates the same two colours as its background `fill` and its one layer's
+`icon.json` restates the same background gradient and yellow as its `fill` and one layer's
 `fill`, because the `.icon` format keeps colour in the document and not in the artwork —
 `Assets/mark.svg` is a stencil, and Icon Composer paints it. The rim light has no
 counterpart there and does not need one: Tahoe lights the edge itself.
@@ -104,16 +106,15 @@ fractions at all.
 
 Geometry, as fractions of the plate (or of the whole canvas, for the full-bleed variant):
 ring outer diameter 86.2 % with a 13.5 % stroke; the play triangle equilateral with corner
-radius 10 % of the ring's inner radius, inscribed in the inner circle — the three corner
-arcs sit on the `r_inner − r_corner` circle about the ring centre, so each is exactly
-tangent to the ring and all three corners kiss it. The reference measures the same tangency
-(corner reach 309.2 vs inner radius 308.5 on its 1043 px canvas).
+radius 10 % of the ring's inner radius. Its reference geometry is scaled to 85 % about the
+ring centre, creating an even gap between all three rounded corners and the ring.
 
 `Assets/mark.svg` is that mark after the 0.85 shrink the other two apply with a transform,
-baked into the path data instead: outer radius 375.14, inner 257.63, 73.2 % of the canvas
-across. It has no strokes at all — Icon Composer flattens a stroked shape to the whole
-region its outline encloses, which turns the ring into a solid disc — so the ring is an
-even-odd annulus of two circles.
+with the ring baked into the path data instead: outer radius 375.14, inner 257.63, 73.2 %
+of the canvas across. It has no strokes at all — Icon Composer flattens a stroked shape to
+the whole region its outline encloses, which turns the ring into a solid disc — so the ring
+is an even-odd annulus of two circles. Its triangle carries the same separate 0.85 transform
+as the other variants.
 
 The plate outline is traced from macOS 26 itself, not drawn from a formula: the mask the
 system composites for its own apps (IconServices' 1024 px render of Music.app) was sampled

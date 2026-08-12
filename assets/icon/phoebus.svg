@@ -15,11 +15,8 @@
 
     Mark geometry is the reference bitmap's, expressed against the 824 plate:
       ring   outer diameter 86.2 %, stroke 13.5 %  ->  r 299.52, stroke-width 111.24
-      play   equilateral, corner radius 10 % of the ring's inner radius, inscribed in the
-             inner circle: the three corner arcs sit on the r_inner - r_corner circle about
-             the ring centre, so each arc is exactly tangent to the ring. All three corners
-             kiss the ring and the gaps read even — the reference measures the same
-             (corner reach 309.2 vs inner radius 308.5 on its 1043 px canvas).
+      play   the reference's rounded equilateral triangle, scaled to 85 % about the centre.
+             Its three corners keep an even gap from the ring instead of touching it.
   -->
 
   <defs>
@@ -28,8 +25,8 @@
     <!-- A few per cent lighter at the top: enough to stop the plate reading as a flat
          sticker in the Dock, not enough to turn a flat brand into a gradient. -->
     <linearGradient id="plate-fill" x1="512" y1="100" x2="512" y2="924" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#303B49"/>
-      <stop offset="1" stop-color="#2A3440"/>
+      <stop offset="0" stop-color="#111A24"/>
+      <stop offset="1" stop-color="#0B121A"/>
     </linearGradient>
 
     <!-- Hairline rim light along the top edge, clipped to the plate so only its inner
@@ -51,7 +48,8 @@
        about the plate centre (ring outer diameter now ~73 % of the plate). -->
   <g fill="#FEFB54" transform="translate(512 512) scale(0.85) translate(-512 -512)">
     <circle cx="512" cy="512" r="299.52" fill="none" stroke="#FEFB54" stroke-width="111.24"/>
-    <path d="M 743.71 533.12 L 414.44 723.22 A 24.39 24.39 0 0 1 377.86 702.10 L 377.85 321.90 A 24.39 24.39 0 0 1 414.44 300.78 L 743.70 490.88 A 24.39 24.39 0 0 1 743.71 533.12 Z"/>
+    <path transform="translate(512 512) scale(0.85) translate(-512 -512)"
+          d="M 743.71 533.12 L 414.44 723.22 A 24.39 24.39 0 0 1 377.86 702.10 L 377.85 321.90 A 24.39 24.39 0 0 1 414.44 300.78 L 743.70 490.88 A 24.39 24.39 0 0 1 743.71 533.12 Z"/>
   </g>
 
   <use href="#plate" fill="none" stroke="url(#plate-rim)" stroke-width="4" clip-path="url(#plate-clip)"/>
