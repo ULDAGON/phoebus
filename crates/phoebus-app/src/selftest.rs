@@ -666,6 +666,8 @@ fn check_state(report: &mut Report) {
         library_root: Some("~/Music/Media.localized/Music".to_string()),
         theme_mode: phoebus_core::ThemeMode::Light,
         accent: "#2EF0FF".to_string(),
+        // The non-default, so the round trip proves the stock-theme opt-out survives too.
+        follow_desktop_theme: false,
         // Three dragged-looking widths, all inside their ranges, so the round trip proves
         // the v1.4 panel widths survive a save/load and not just their defaults.
         sidebar_w: 265.0,

@@ -57,6 +57,20 @@ Point it anywhere in **Settings** (sidebar, bottom) — including straight at
 `~/Music/Music/Media.localized/Music`. Phoebus only ever *reads* the library root: app data
 (state, playlists, cover cache) lives in `~/.phoebus/.phoebus/`, never in your music.
 
+## Omarchy
+
+On [Omarchy](https://omarchy.org), Phoebus can wear the active system theme — surfaces,
+accent and dark/light mode, switching live with `omarchy-theme-set` — and ship a widget
+for the Omarchy bar. One command wires both up:
+
+```
+contrib/omarchy/install.sh
+```
+
+Media keys and the built-in bar media widget already control Phoebus with nothing
+installed (it is a full MPRIS player). See [contrib/omarchy](contrib/omarchy/README.md)
+for how the bridge works and how to undo it.
+
 ## Build & run
 
 ```

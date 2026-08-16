@@ -17,9 +17,13 @@ egui_extras.workspace = true
 image.workspace = true
 crossbeam-channel.workspace = true
 souvlaki = { workspace = true }
+serde_json.workspace = true
 anyhow.workspace = true
 log.workspace = true
 env_logger.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
 
 # The Dock icon of an unbundled binary (`cargo run`) can only be set through AppKit —
 # eframe's viewport icon is a *window* icon and macOS has no such thing. winit already
@@ -40,7 +44,10 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 
 # eframe's wayland/x11 features do not forward winit's defaults; without these the
 # Linux binary hard-links libwayland-client and loses adwaita window frames on GNOME.
+# `dbus` is the queue service's bus binding (`remote.rs`); the crate is already in
+# the Linux tree as souvlaki's MPRIS backend, so this pins no new native library.
 [target.'cfg(target_os = "linux")'.dependencies]
+dbus = "0.9"
 winit = { version = "0.30.13", default-features = false, features = [
     "wayland",
     "x11",

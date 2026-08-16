@@ -341,7 +341,8 @@ fn playback_of(now: Snapshot, pos: Duration) -> MediaPlayback {
 ///
 /// `Play` and `Pause` are separate buttons on both platforms but the controller only has a
 /// toggle, so they are gated on the current state — pressing Play twice must not pause.
-/// Volume, `OpenUri`, `Raise` and `Quit` are ignored.
+/// `Raise` (a bar widget's "show me the player") focuses the window. Volume, `OpenUri` and
+/// `Quit` are ignored.
 fn to_action(event: &MediaControlEvent, playing: bool, pos: Duration) -> Option<Action> {
     match event {
         MediaControlEvent::Toggle => Some(Action::TogglePlay),
@@ -353,9 +354,9 @@ fn to_action(event: &MediaControlEvent, playing: bool, pos: Duration) -> Option<
         MediaControlEvent::SetPosition(MediaPosition(at)) => Some(Action::Seek(*at)),
         MediaControlEvent::SeekBy(dir, by) => Some(Action::Seek(seek_target(pos, *dir, *by))),
         MediaControlEvent::Seek(dir) => Some(Action::Seek(seek_target(pos, *dir, SEEK_STEP))),
+        MediaControlEvent::Raise => Some(Action::RaiseWindow),
         MediaControlEvent::SetVolume(_)
         | MediaControlEvent::OpenUri(_)
-        | MediaControlEvent::Raise
         | MediaControlEvent::Quit => None,
     }
 }
@@ -623,11 +624,18 @@ mod tests {
     }
 
     #[test]
+    fn raise_becomes_a_window_raise() {
+        assert!(matches!(
+            to_action(&MediaControlEvent::Raise, false, secs(0)),
+            Some(Action::RaiseWindow)
+        ));
+    }
+
+    #[test]
     fn the_rest_of_the_events_are_ignored() {
         for event in [
             MediaControlEvent::SetVolume(0.5),
             MediaControlEvent::OpenUri("file:///x.mp3".to_string()),
-            MediaControlEvent::Raise,
             MediaControlEvent::Quit,
         ] {
             assert!(

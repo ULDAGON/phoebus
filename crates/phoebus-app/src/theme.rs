@@ -7,7 +7,8 @@
 //! Colour is a *runtime* value. A [`Palette`] is derived from a [`ThemeMode`] and one accent
 //! colour and published process-wide, so every call site reads `theme::p().text_hi` instead
 //! of a constant. Type, geometry, glyphs and timings stay `const`: they do not depend on the
-//! theme.
+//! theme. A desktop that themes its applications (Omarchy) may additionally override the
+//! seven mode-derived surface/text colours through a [`Ramp`] — see [`crate::theme_file`].
 //!
 //! The dark palette is the UI-SPEC v1.2 one: blue-slate surfaces, three greys, one yellow.
 //! The accent is rationed whatever its hue — it may only ever mean *playing*, *active* or
@@ -115,11 +116,22 @@ pub struct Palette {
     pub scrim: Color32,
 }
 
-/// Resolve the palette for a mode and an accent.
+/// Resolve the palette for a mode and an accent, with the built-in surfaces.
 ///
 /// Pure: the same inputs always give the same colours, which is what makes the contrast
 /// rules testable without a window.
 pub fn palette(mode: ThemeMode, accent: Color32) -> Palette {
+    palette_with(mode, accent, Ramp::NONE)
+}
+
+/// Resolve the palette for a mode and an accent, letting an external theme replace any of
+/// the seven surface/text colours the mode would otherwise hard-code.
+///
+/// Everything *derived* keeps deriving: `accent_dim` mixes toward the overridden `bg0`,
+/// `accent_text` is pushed to [`MIN_CONTRAST`] against it, and the selection wash stays the
+/// accent at [`SELECTION_ALPHA`] — so an Omarchy palette gets the same legibility guarantees
+/// as the built-in one.
+pub fn palette_with(mode: ThemeMode, accent: Color32, ramp: Ramp) -> Palette {
     // UI-SPEC v1.2 §Colors. Dark is blue-slate: `bg1` (sidebar, player bar) is *darker*
     // than `bg0` (the content views), so the chrome recedes and the router reads as the lit
     // surface. Text tokens are the v1.1 ones, unchanged.
@@ -143,6 +155,13 @@ pub fn palette(mode: ThemeMode, accent: Color32) -> Palette {
             Color32::from_rgb(0x9A, 0x9A, 0x98),
         ),
     };
+    let bg0 = ramp.bg0.unwrap_or(bg0);
+    let bg1 = ramp.bg1.unwrap_or(bg1);
+    let bg2 = ramp.bg2.unwrap_or(bg2);
+    let border = ramp.border.unwrap_or(border);
+    let text_hi = ramp.text_hi.unwrap_or(text_hi);
+    let text_mid = ramp.text_mid.unwrap_or(text_mid);
+    let text_low = ramp.text_low.unwrap_or(text_low);
     let accent_text = readable(accent, bg0);
     let (stripe, scrim) = match mode {
         ThemeMode::Dark => (
@@ -177,6 +196,42 @@ pub fn palette(mode: ThemeMode, accent: Color32) -> Palette {
         stripe,
         scrim,
     }
+}
+
+/// Overrides for the seven colours [`palette_with`] would otherwise take from the mode.
+///
+/// One slot per hard-coded ramp colour, each optional: an external theme replaces what it
+/// names and the built-in ramp answers for the rest, so a minimal `phoebus.toml` holding
+/// nothing but a `bg0` is already a theme.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Ramp {
+    /// Replaces [`Palette::bg0`].
+    pub bg0: Option<Color32>,
+    /// Replaces [`Palette::bg1`].
+    pub bg1: Option<Color32>,
+    /// Replaces [`Palette::bg2`].
+    pub bg2: Option<Color32>,
+    /// Replaces [`Palette::border`].
+    pub border: Option<Color32>,
+    /// Replaces [`Palette::text_hi`].
+    pub text_hi: Option<Color32>,
+    /// Replaces [`Palette::text_mid`].
+    pub text_mid: Option<Color32>,
+    /// Replaces [`Palette::text_low`].
+    pub text_low: Option<Color32>,
+}
+
+impl Ramp {
+    /// No overrides: [`palette_with`] behaves exactly like [`palette`].
+    pub const NONE: Ramp = Ramp {
+        bg0: None,
+        bg1: None,
+        bg2: None,
+        border: None,
+        text_hi: None,
+        text_mid: None,
+        text_low: None,
+    };
 }
 
 /// Move `color` away from `bg` until it reads as text on it.
@@ -269,10 +324,11 @@ pub fn p() -> Palette {
     *current().read().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Publish a new palette process-wide. Callers holding a [`Context`] want [`apply`], which
-/// also rebuilds egui's own styling.
-pub fn set(mode: ThemeMode, accent: Color32) -> Palette {
-    let next = palette(mode, accent);
+/// Publish a new palette process-wide ([`Ramp::NONE`] for the built-in surfaces). Callers
+/// holding a [`Context`] want [`apply`] / [`apply_with`], which also rebuild egui's own
+/// styling.
+pub fn set(mode: ThemeMode, accent: Color32, ramp: Ramp) -> Palette {
+    let next = palette_with(mode, accent, ramp);
     *current().write().unwrap_or_else(PoisonError::into_inner) = next;
     next
 }
@@ -336,6 +392,132 @@ pub fn resolve(state: &AppState) -> (ThemeMode, Color32) {
         }
         None => (state.theme_mode, saved),
     }
+}
+
+// ---------------------------------------------------------------------------------------
+// External theme files (the Omarchy bridge)
+// ---------------------------------------------------------------------------------------
+
+/// A theme handed in from outside the app — the parsed form of the `phoebus.toml` that
+/// Omarchy's template renders on every theme switch (see [`crate::theme_file`]).
+///
+/// Everything is optional: the file overrides what it names and the app answers for the
+/// rest, exactly like [`Ramp`] inside it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ExternalTheme {
+    /// The mode the file's colours are designed for, if it says.
+    pub mode: Option<ThemeMode>,
+    /// The desktop's accent.
+    pub accent: Option<Color32>,
+    /// Surface and text overrides.
+    pub ramp: Ramp,
+}
+
+impl ExternalTheme {
+    /// True when the file held not one usable key — which is no theme at all.
+    pub fn is_empty(&self) -> bool {
+        *self == ExternalTheme::default()
+    }
+
+    /// The ramp, if it may be painted in `mode`.
+    ///
+    /// A ramp is designed against its file's `mode`: Tokyo Night's near-black surfaces
+    /// under light-mode text tokens would be unreadable. So when the user toggles the mode
+    /// away from the file's, the built-in ramp for the new mode takes over (until the file
+    /// next changes and re-asserts itself). A file that named no mode is taken at its word
+    /// that the ramp is mode-less.
+    pub fn ramp_for(&self, mode: ThemeMode) -> Ramp {
+        match self.mode {
+            None => self.ramp,
+            Some(designed_for) if designed_for == mode => self.ramp,
+            Some(_) => Ramp::NONE,
+        }
+    }
+}
+
+/// Parse the body of an external theme file.
+///
+/// The grammar is the same flat `key = "value"` subset of TOML that Omarchy's own
+/// `colors.toml` uses: one pair per line, `#` comments, values quoted (either quote) or
+/// bare. Keys are Phoebus's own palette tokens — `mode`, `accent`, `bg0`, `bg1`, `bg2`,
+/// `border`, `text_hi`, `text_mid`, `text_low` — because the Omarchy template
+/// (`contrib/omarchy/phoebus.toml.tpl`) is where Omarchy's vocabulary is mapped to ours.
+/// Unknown keys are ignored so the file can grow; a known key with an unparseable value
+/// is dropped with a warning rather than taking the whole file down.
+pub fn parse_external(text: &str) -> ExternalTheme {
+    let mut ext = ExternalTheme::default();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let (key, value) = (key.trim(), unquote(value));
+        if key == "mode" {
+            match ThemeMode::parse(value) {
+                Some(mode) => ext.mode = Some(mode),
+                None => log::warn!("theme file: mode = {value:?} is not dark/light; ignored"),
+            }
+            continue;
+        }
+        let slot = match key {
+            "accent" => &mut ext.accent,
+            "bg0" => &mut ext.ramp.bg0,
+            "bg1" => &mut ext.ramp.bg1,
+            "bg2" => &mut ext.ramp.bg2,
+            "border" => &mut ext.ramp.border,
+            "text_hi" => &mut ext.ramp.text_hi,
+            "text_mid" => &mut ext.ramp.text_mid,
+            "text_low" => &mut ext.ramp.text_low,
+            _ => continue,
+        };
+        match phoebus_core::parse_hex_color(value) {
+            Some(rgb) => *slot = Some(color(rgb)),
+            None => log::warn!("theme file: {key} = {value:?} is not #RRGGBB; ignored"),
+        }
+    }
+    ext
+}
+
+/// The value side of a `key = value` line: the text between the first pair of quotes, or
+/// the bare value trimmed with any trailing comment removed.
+///
+/// A comment on a bare value needs whitespace before its `#` — the value itself is
+/// usually `#RRGGBB`, so the first `#` of the line cannot be the comment marker.
+fn unquote(raw: &str) -> &str {
+    let raw = raw.trim();
+    for quote in ['"', '\''] {
+        if let Some(rest) = raw.strip_prefix(quote)
+            && let Some((inner, _)) = rest.split_once(quote)
+        {
+            return inner;
+        }
+    }
+    let raw = raw.split_once(" #").map_or(raw, |(value, _)| value);
+    let raw = raw.split_once("\t#").map_or(raw, |(value, _)| value);
+    raw.trim()
+}
+
+/// Where the live palette is coming from, when it is not the user's own choice.
+///
+/// Written by the app alongside [`apply_with`] whenever an external theme file starts or
+/// stops driving the palette; read by Settings, which owes the user an explanation for
+/// why its own swatches are not the last word right now.
+static SOURCE: RwLock<Option<String>> = RwLock::new(None);
+
+/// Record (or clear, with `None`) the external file the palette follows.
+pub fn set_source(path: Option<String>) {
+    *SOURCE.write().unwrap_or_else(PoisonError::into_inner) = path;
+}
+
+/// The external file the palette follows right now, for Settings to show.
+pub fn source() -> Option<String> {
+    SOURCE
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
 }
 
 /// Carry a saved accent forward across a change of default.
@@ -816,6 +998,9 @@ pub const PREV_RESTART_SECS: f32 = 3.0;
 pub const REPAINT_MS: u64 = 250;
 /// Debounce before `state.json` is rewritten.
 pub const SAVE_DEBOUNCE_MS: u64 = 1000;
+/// How often [`crate::theme_file`] looks at the external theme file. One stat per second:
+/// slow enough to cost nothing, fast enough that an Omarchy theme switch reads as live.
+pub const THEME_FILE_POLL_MS: u64 = 1000;
 /// Minimum gap between live seeks while dragging the seek bar (≤ 2/s).
 pub const LIVE_SEEK_MS: u64 = 500;
 /// Volume step for `⌘↑` / `⌘↓`.
@@ -956,7 +1141,12 @@ pub fn hover_color(hovered: bool, idle: Color32, hover: Color32) -> Color32 {
 /// allocates no textures, it only rewrites two `Style` structs. (The first call also registers
 /// the CJK fallback face; see [`install_fonts`].)
 pub fn apply(ctx: &Context, mode: ThemeMode, accent: Color32) {
-    let next = set(mode, accent);
+    apply_with(ctx, mode, accent, Ramp::NONE);
+}
+
+/// [`apply`], with an external theme's surface overrides.
+pub fn apply_with(ctx: &Context, mode: ThemeMode, accent: Color32, ramp: Ramp) {
+    let next = set(mode, accent, ramp);
     install_style(ctx, &next);
 }
 
@@ -1088,6 +1278,123 @@ mod tests {
         ("accent_text", Color32::from_rgb(0xFF, 0xFB, 0x00)),
         ("on_accent", Color32::from_rgb(0x0A, 0x0A, 0x0A)),
     ];
+
+    /// Tokyo Night, as `contrib/omarchy/phoebus.toml.tpl` would render it — the ramp the
+    /// external-theme tests paint with.
+    const TOKYO: Ramp = Ramp {
+        bg0: Some(Color32::from_rgb(0x1A, 0x1B, 0x26)),
+        bg1: Some(Color32::from_rgb(0x13, 0x14, 0x1C)),
+        bg2: Some(Color32::from_rgb(0x24, 0x28, 0x3B)),
+        border: Some(Color32::from_rgb(0x29, 0x2E, 0x42)),
+        text_hi: Some(Color32::from_rgb(0xA9, 0xB1, 0xD6)),
+        text_mid: Some(Color32::from_rgb(0x7E, 0x84, 0xA2)),
+        text_low: Some(Color32::from_rgb(0x56, 0x5F, 0x89)),
+    };
+
+    #[test]
+    fn an_external_ramp_replaces_the_surfaces_and_keeps_the_derivations() {
+        let accent = Color32::from_rgb(0x7A, 0xA2, 0xF7);
+        let p = palette_with(ThemeMode::Dark, accent, TOKYO);
+        assert_eq!(p.bg0, TOKYO.bg0.unwrap());
+        assert_eq!(p.bg1, TOKYO.bg1.unwrap());
+        assert_eq!(p.bg2, TOKYO.bg2.unwrap());
+        assert_eq!(p.border, TOKYO.border.unwrap());
+        assert_eq!(p.text_hi, TOKYO.text_hi.unwrap());
+        assert_eq!(p.text_mid, TOKYO.text_mid.unwrap());
+        assert_eq!(p.text_low, TOKYO.text_low.unwrap());
+        // The derived tokens derive against the *overridden* surfaces.
+        assert_eq!(p.accent, accent);
+        assert!(
+            contrast(p.accent_text, p.bg0) >= MIN_CONTRAST,
+            "accent_text must clear {MIN_CONTRAST}:1 against the external bg0"
+        );
+        assert_eq!(p.accent_dim, mix(accent, TOKYO.bg0.unwrap(), DIM_MIX));
+        assert_eq!(
+            p.selection_bg,
+            Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), SELECTION_ALPHA)
+        );
+    }
+
+    #[test]
+    fn a_partial_ramp_falls_back_to_the_built_in_colours() {
+        let bg0 = Color32::from_rgb(0x10, 0x10, 0x10);
+        let ramp = Ramp {
+            bg0: Some(bg0),
+            ..Ramp::NONE
+        };
+        let p = palette_with(ThemeMode::Dark, DEFAULT_ACCENT, ramp);
+        let built_in = palette(ThemeMode::Dark, DEFAULT_ACCENT);
+        assert_eq!(p.bg0, bg0);
+        assert_eq!(p.bg1, built_in.bg1);
+        assert_eq!(p.text_hi, built_in.text_hi);
+        // …and an empty ramp is exactly the built-in palette.
+        assert_eq!(
+            palette_with(ThemeMode::Dark, DEFAULT_ACCENT, Ramp::NONE),
+            built_in
+        );
+    }
+
+    #[test]
+    fn parse_external_reads_the_bridge_file() {
+        let ext = parse_external(concat!(
+            "# rendered by omarchy-theme-set-templates\n",
+            "mode = \"dark\"\n",
+            "accent = \"#7AA2F7\"\n",
+            "\n",
+            "bg0 = \"#1A1B26\"\n",
+            "bg1 = '#13141C'\n",
+            "border = #292E42   # bare value, trailing comment\n",
+            "text_hi = \"#A9B1D6\"\n",
+            "future_key = \"#123456\"\n", // unknown: ignored, not fatal
+            "text_low = \"not a colour\"\n", // invalid: dropped, not fatal
+        ));
+        assert_eq!(ext.mode, Some(ThemeMode::Dark));
+        assert_eq!(ext.accent, Some(Color32::from_rgb(0x7A, 0xA2, 0xF7)));
+        assert_eq!(ext.ramp.bg0, Some(Color32::from_rgb(0x1A, 0x1B, 0x26)));
+        assert_eq!(ext.ramp.bg1, Some(Color32::from_rgb(0x13, 0x14, 0x1C)));
+        assert_eq!(ext.ramp.border, Some(Color32::from_rgb(0x29, 0x2E, 0x42)));
+        assert_eq!(ext.ramp.text_hi, Some(Color32::from_rgb(0xA9, 0xB1, 0xD6)));
+        assert_eq!(ext.ramp.text_low, None, "an unparseable value is dropped");
+        assert_eq!(ext.ramp.bg2, None);
+        assert!(!ext.is_empty());
+    }
+
+    #[test]
+    fn parse_external_of_junk_is_empty() {
+        for junk in [
+            "",
+            "\n\n",
+            "# only a comment\n",
+            "no equals sign\n",
+            "mode = \"sepia\"\n",
+        ] {
+            assert!(parse_external(junk).is_empty(), "{junk:?}");
+        }
+    }
+
+    /// A ramp is designed for its file's mode; toggling away from it must not paint dark
+    /// surfaces under light text tokens.
+    #[test]
+    fn the_ramp_only_applies_in_the_mode_it_was_designed_for() {
+        let ext = ExternalTheme {
+            mode: Some(ThemeMode::Dark),
+            accent: None,
+            ramp: TOKYO,
+        };
+        assert_eq!(ext.ramp_for(ThemeMode::Dark), TOKYO);
+        assert_eq!(ext.ramp_for(ThemeMode::Light), Ramp::NONE);
+        // A file that named no mode is taken at its word that the ramp is mode-less.
+        let modeless = ExternalTheme { mode: None, ..ext };
+        assert_eq!(modeless.ramp_for(ThemeMode::Light), TOKYO);
+    }
+
+    #[test]
+    fn the_source_label_round_trips() {
+        set_source(Some("/tmp/x/phoebus.toml".to_string()));
+        assert_eq!(source().as_deref(), Some("/tmp/x/phoebus.toml"));
+        set_source(None);
+        assert_eq!(source(), None);
+    }
 
     /// The six presets UI-SPEC's Settings view offers, plus the two extremes and a colour
     /// dark enough to break the "just darken it" rule.

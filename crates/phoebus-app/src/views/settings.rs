@@ -7,15 +7,17 @@
 //!   the current root actually yielded, and `RESCAN` for that root as it stands. When
 //!   `$PHOEBUS_LIBRARY` is set it outranks everything, so the input is disabled and says so —
 //!   but `RESCAN` keeps working, since it changes no setting.
-//! * `THEME` — `DARK`/`LIGHT`, six preset swatches, egui's colour picker for anything else,
-//!   and `RESET` back to the default yellow. Every change applies on the next frame and is
-//!   saved.
+//! * `THEME` — while a desktop theme file is on offer, a `SOURCE` pair (`DESKTOP`, the
+//!   default, or `STOCK` for Phoebus's own theme); then `DARK`/`LIGHT`, six preset
+//!   swatches, egui's colour picker for anything else, and `RESET` back to the default
+//!   yellow. Every change applies on the next frame and is saved.
 //!
 //! Under both, pinned below the scroll area rather than inside it, sits the build stamp
 //! ([`VERSION`]) in the bottom-right corner.
 //!
 //! The view owns none of this: it raises [`Action::Rescan`], [`Action::SetLibraryRoot`],
-//! [`Action::SetThemeMode`] and [`Action::SetAccent`], and the app decides what happens —
+//! [`Action::SetThemeMode`], [`Action::SetAccent`] and [`Action::SetFollowDesktopTheme`],
+//! and the app decides what happens —
 //! including whether the typed path is a directory at all, which is why the error flag lives
 //! in [`State`] and is written by the app, not here.
 
@@ -70,7 +72,7 @@ impl State {
     }
 }
 
-/// The library facts the view needs but cannot work out for itself.
+/// The library and theme facts the view needs but cannot work out for itself.
 #[derive(Clone, Copy)]
 pub struct Info<'a> {
     /// The root being scanned right now.
@@ -81,6 +83,12 @@ pub struct Info<'a> {
     pub env_override: Option<&'a str>,
     /// The root as the user typed it in a previous session, if any.
     pub configured: Option<&'a str>,
+    /// A desktop theme file (the Omarchy bridge) is currently on offer — what makes the
+    /// `SOURCE` toggle worth drawing at all.
+    pub desktop_theme: bool,
+    /// The persisted choice that toggle shows: follow the desktop (`true`, the default)
+    /// or paint Phoebus's own theme.
+    pub follow_desktop: bool,
 }
 
 impl Info<'_> {
@@ -110,7 +118,7 @@ pub fn show(ui: &mut Ui, cx: &mut Ctx, st: &mut State, info: &Info) {
                 views::heading(ui, "SETTINGS");
                 library_section(ui, cx, st, info);
                 ui.add_space(theme::SECTION_GAP);
-                theme_section(ui, cx);
+                theme_section(ui, cx, info);
             });
         version_stamp(ui, stamp);
     });
@@ -210,8 +218,38 @@ fn library_section(ui: &mut Ui, cx: &mut Ctx, st: &mut State, info: &Info) {
     }
 }
 
-fn theme_section(ui: &mut Ui, cx: &mut Ctx) {
+fn theme_section(ui: &mut Ui, cx: &mut Ctx, info: &Info) {
     views::section(ui, "THEME");
+
+    // The desktop offers a theme (an Omarchy theme file): the user picks between
+    // following it — the default — and Phoebus's stock theme. Stock is an explicit
+    // choice, which is why the pair only appears while there is a desktop theme to
+    // refuse; with none on offer the stock theme is not a choice, it is all there is.
+    if info.desktop_theme {
+        widgets::micro(ui, "SOURCE");
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            for (label, follow) in [("DESKTOP", true), ("STOCK", false)] {
+                let clicked = if info.follow_desktop == follow {
+                    widgets::primary_button(ui, "", label).clicked()
+                } else {
+                    widgets::secondary_button(ui, "", label).clicked()
+                };
+                if clicked {
+                    cx.act(Action::SetFollowDesktopTheme(follow));
+                }
+            }
+        });
+        ui.add_space(theme::CARD_TEXT_GAP * 1.5);
+    }
+
+    // The desktop is driving: say so, and from where. The swatches below still work — a
+    // pick lands on top of the desktop's surfaces until the file next changes — but the
+    // file is the reason the palette may not match what was last chosen here.
+    if let Some(source) = theme::source() {
+        widgets::micro(ui, &format!("FOLLOWING {source}"));
+        ui.add_space(theme::CARD_TEXT_GAP);
+    }
 
     let palette = theme::p();
     widgets::micro(ui, "MODE");
@@ -353,6 +391,8 @@ mod tests {
             default_root: default,
             env_override: None,
             configured: None,
+            desktop_theme: false,
+            follow_desktop: true,
         };
         assert_eq!(plain.prefill(), "/music/Media");
 

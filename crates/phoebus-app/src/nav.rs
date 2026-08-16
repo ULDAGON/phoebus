@@ -190,12 +190,19 @@ pub enum Action {
     SetThemeMode(ThemeMode),
     /// Settings: repaint with a new accent, live.
     SetAccent([u8; 3]),
+    /// Settings: follow the desktop's theme file (`true`, the default) or paint Phoebus's
+    /// own theme even while such a file exists (`false`). Only offered while a desktop
+    /// theme is actually available.
+    SetFollowDesktopTheme(bool),
     /// The Artists view's split was dragged: persist the new list width.
     ///
     /// The view has already moved its own copy in `ViewState` — this frame is drawn at the
     /// new width, not the next one. The action exists so the *persisting* still goes
     /// through the app, which is the only thing allowed to talk to the controller.
     SetArtistListW(f32),
+    /// MPRIS `Raise`: bring the window to the front. Raised by a desktop widget's
+    /// "show me the player" click; no in-app control emits it.
+    RaiseWindow,
     /// Move keyboard focus into the sidebar's search field.
     FocusSearch,
     /// Escape: unwind one step, innermost first — the add-songs picker, then a rename,
