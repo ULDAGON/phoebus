@@ -162,6 +162,13 @@ pub struct AppState {
     /// Accent color as `#RRGGBB`. Normalized to uppercase on load; an unparseable value
     /// falls back to [`DEFAULT_ACCENT`].
     pub accent: String,
+    /// Follow a theme file the desktop offers (the Omarchy bridge), when there is one.
+    ///
+    /// `true` — the default — means a desktop that renders a `phoebus.toml` drives the
+    /// palette; `false` means the user explicitly asked for Phoebus's own theme (the
+    /// `theme_mode` + `accent` above) even while such a file exists. Meaningless, and
+    /// ignored, where no theme file is ever found.
+    pub follow_desktop_theme: bool,
     /// Sidebar width in logical points, as the user last dragged it ([`SIDEBAR_WIDTH`]).
     pub sidebar_w: f32,
     /// Up Next drawer width in logical points ([`QUEUE_WIDTH`]).
@@ -181,6 +188,7 @@ impl Default for AppState {
             library_root: None,
             theme_mode: ThemeMode::default(),
             accent: DEFAULT_ACCENT.to_string(),
+            follow_desktop_theme: true,
             sidebar_w: SIDEBAR_WIDTH.default,
             queue_w: QUEUE_WIDTH.default,
             artist_list_w: ARTIST_LIST_WIDTH.default,
@@ -331,6 +339,10 @@ mod tests {
         assert_eq!(s.library_root, None, "default root = ~/.phoebus");
         assert_eq!(s.theme_mode, ThemeMode::Dark);
         assert_eq!(s.accent, DEFAULT_ACCENT);
+        assert!(
+            s.follow_desktop_theme,
+            "a desktop theme is followed until the user says otherwise"
+        );
         assert_eq!(s.sidebar_w, SIDEBAR_WIDTH.default);
         assert_eq!(s.queue_w, QUEUE_WIDTH.default);
         assert_eq!(s.artist_list_w, ARTIST_LIST_WIDTH.default);
@@ -348,6 +360,7 @@ mod tests {
             library_root: Some("~/Music/Media.localized/Music".to_string()),
             theme_mode: ThemeMode::Light,
             accent: "#2EF0FF".to_string(),
+            follow_desktop_theme: false,
             sidebar_w: 265.0,
             queue_w: 244.0,
             artist_list_w: 310.0,
@@ -430,6 +443,10 @@ mod tests {
         assert_eq!(s.library_root, None);
         assert_eq!(s.theme_mode, ThemeMode::Dark);
         assert_eq!(s.accent, DEFAULT_ACCENT);
+        assert!(
+            s.follow_desktop_theme,
+            "a file from before the toggle keeps following the desktop"
+        );
         assert_eq!(s.configured_library_root(), None);
         // …and the v1.4 panel widths come back as the fixed sizes that build had.
         assert_eq!(s.sidebar_w, SIDEBAR_WIDTH.default);

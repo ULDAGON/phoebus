@@ -277,6 +277,8 @@ mod tests {
             default_root: std::path::Path::new("/home/nobody/.phoebus"),
             env_override: None,
             configured: None,
+            desktop_theme: false,
+            follow_desktop: true,
         }
     }
 
@@ -408,6 +410,19 @@ mod tests {
             Some("/lib"),
             "a locked input shows what is actually being scanned"
         );
+
+        // The SOURCE toggle exists only while a desktop theme is on offer, and it has two
+        // states; both have to lay out.
+        let themed = settings::Info {
+            desktop_theme: true,
+            ..plain_info()
+        };
+        render_with(&View::Settings, "", &mut st, &lib, &[], &themed, &favs);
+        let stock = settings::Info {
+            follow_desktop: false,
+            ..themed
+        };
+        render_with(&View::Settings, "", &mut st, &lib, &[], &stock, &favs);
     }
 
     /// UI-SPEC §Favorites, on the real widget tree: the view lays out populated as well as

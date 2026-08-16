@@ -190,6 +190,10 @@ pub enum Action {
     SetThemeMode(ThemeMode),
     /// Settings: repaint with a new accent, live.
     SetAccent([u8; 3]),
+    /// Settings: follow the desktop's theme file (`true`, the default) or paint Phoebus's
+    /// own theme even while such a file exists (`false`). Only offered while a desktop
+    /// theme is actually available.
+    SetFollowDesktopTheme(bool),
     /// The Artists view's split was dragged: persist the new list width.
     ///
     /// The view has already moved its own copy in `ViewState` — this frame is drawn at the

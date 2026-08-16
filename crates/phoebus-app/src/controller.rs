@@ -567,6 +567,22 @@ impl Controller {
         (self.state.theme_mode, self.state.accent_rgb())
     }
 
+    /// Whether a desktop theme file, when one exists, drives the palette (the default) —
+    /// or the user has explicitly asked for Phoebus's own theme instead.
+    pub fn follow_desktop_theme(&self) -> bool {
+        self.state.follow_desktop_theme
+    }
+
+    /// Remember the Settings choice between the desktop's theme and Phoebus's own.
+    /// Persisting only — [`crate::app::Phoebus`] repaints, exactly as with `set_theme`.
+    pub fn set_follow_desktop_theme(&mut self, follow: bool) {
+        if self.state.follow_desktop_theme == follow {
+            return;
+        }
+        self.state.follow_desktop_theme = follow;
+        self.mark_dirty();
+    }
+
     /// The library root the Settings view has configured, as the user typed it (`None` for
     /// "the default"). Not necessarily the *active* root — `$PHOEBUS_LIBRARY` outranks it.
     pub fn configured_library_root(&self) -> Option<&str> {

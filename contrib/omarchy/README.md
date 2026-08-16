@@ -27,6 +27,11 @@ Details worth knowing:
 - **Settings still work.** Picking an accent or mode in Phoebus's Settings while
   following applies on top of the Omarchy surfaces; the next Omarchy theme switch
   re-asserts the full theme. The Settings view says which file it is following.
+- **Opting out is a setting, not an uninstall.** While a theme file is on offer, the
+  Settings view's `THEME` section grows a `SOURCE` toggle: `DESKTOP` (the default)
+  follows Omarchy, `STOCK` keeps Phoebus's own theme — dark blue, yellow accent —
+  with the file still tracked, so flipping back applies the desktop's current theme
+  at once. The choice persists across runs.
 - `PHOEBUS_THEME` (the one-run override) outranks the file entirely, and
   `PHOEBUS_THEME_FILE=/path/to/file` points the integration at a different file —
   set it empty (`PHOEBUS_THEME_FILE=`) to disable following for a run.
@@ -36,9 +41,13 @@ Details worth knowing:
 ## What the widget does
 
 `plugin/` is an Omarchy shell bar widget (`phoebus.media`) that appears whenever
-Phoebus is running: wordmark dot, play/pause state, current track. Left click toggles
-play/pause, right click skips, the wheel steps prev/next, and middle click raises the
-Phoebus window (MPRIS `Raise`).
+Phoebus is running: a play glyph and the current track. The bar part is deliberately
+inert — right click, middle click and the wheel do nothing. Left click opens a
+now-playing panel: cover art, title/artist/album, a seek bar for the timestamp,
+previous / play-pause / next buttons, a shuffle toggle, and a collapsible up-next
+list (click a row to jump to it). The queue half talks to Phoebus's own
+`org.phoebus.Queue` D-Bus service — MPRIS has no queue — so it needs a Phoebus
+built from this branch or newer.
 
 It is optional — Phoebus is a full MPRIS player, so Omarchy's media keys and the
 built-in `omarchy.media` widget already control it with nothing installed. This widget

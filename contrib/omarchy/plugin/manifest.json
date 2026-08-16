@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "id": "phoebus.media",
   "name": "Phoebus",
-  "version": "1.0.0",
+  "version": "2.1.0",
   "author": "Phoebus",
-  "description": "Phoebus now-playing with playback controls",
+  "description": "Phoebus now-playing: click for a panel with cover art, seek, transport, shuffle and the queue",
   "kinds": [
     "bar-widget"
   ],
@@ -13,7 +13,7 @@
   },
   "barWidget": {
     "displayName": "Phoebus",
-    "description": "Now playing in Phoebus: click to play/pause, middle-click to raise",
+    "description": "Now playing in Phoebus: left click opens the player panel",
     "category": "Media",
     "allowMultiple": false
   }

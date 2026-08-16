@@ -37,6 +37,7 @@ mod icon;
 mod lifecycle;
 mod media_keys;
 mod nav;
+mod remote;
 mod selftest;
 mod shots;
 mod theme;

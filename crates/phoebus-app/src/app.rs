@@ -17,6 +17,7 @@ use crate::artwork::Artwork;
 use crate::controller::Controller;
 use crate::media_keys::MediaKeys;
 use crate::nav::{Action, Ctx, Fmt, Now, View};
+use crate::remote::{self, Remote};
 use crate::shots::{self, Capture, Shot, Step, Tour};
 use crate::theme;
 use crate::theme_file::{ThemeFile, ThemeFileEvent};
@@ -70,6 +71,9 @@ pub struct Phoebus {
     /// OS media keys and the Now Playing card. Disabled, never absent, if the platform
     /// would not hand them over.
     media_keys: MediaKeys,
+    /// The queue-over-D-Bus service desktop widgets read ([`crate::remote`]). Inert
+    /// off Linux.
+    remote: Remote,
 
     view: View,
     back_stack: Vec<Back>,
@@ -142,6 +146,7 @@ impl Phoebus {
             artwork: Artwork::new(),
             controller,
             media_keys: MediaKeys::new(&cc.egui_ctx),
+            remote: Remote::new(&cc.egui_ctx),
             view,
             back_stack: Vec::new(),
             search: String::new(),
@@ -165,7 +170,7 @@ impl Phoebus {
         // `Action::SetArtistListW`.
         app.vstate.artists.list_w = app.controller.artist_list_w();
         // Before the first frame: nothing above this line paints.
-        if app.external.is_some() {
+        if app.external.is_some() && app.controller.follow_desktop_theme() {
             app.apply_external(&cc.egui_ctx);
         } else {
             app.set_theme(&cc.egui_ctx, mode, accent);
@@ -183,9 +188,11 @@ impl Phoebus {
     fn set_theme(&mut self, ctx: &egui::Context, mode: phoebus_core::ThemeMode, accent: Color32) {
         // While an external theme file is being followed, a Settings pick lands on top of
         // the file's surfaces rather than snapping back to the built-in ramp; the file
-        // re-asserts the whole theme on its next change.
+        // re-asserts the whole theme on its next change. With following switched off the
+        // file has no say, however present it is.
         let ramp = self
             .external
+            .filter(|_| self.controller.follow_desktop_theme())
             .map_or(theme::Ramp::NONE, |ext| ext.ramp_for(mode));
         theme::apply_with(ctx, mode, accent, ramp);
         self.controller.set_theme(mode, theme::rgb(accent));
@@ -215,20 +222,43 @@ impl Phoebus {
         ctx.request_repaint();
     }
 
+    /// Settings' SOURCE toggle: hand the palette to the desktop's theme file, or take it
+    /// back. The choice persists; the repaint is immediate either way.
+    fn set_follow_desktop(&mut self, ctx: &egui::Context, follow: bool) {
+        self.controller.set_follow_desktop_theme(follow);
+        if follow {
+            // A no-op when the file has meanwhile gone away — the palette then already
+            // paints the persisted theme, which is what following nothing looks like.
+            self.apply_external(ctx);
+        } else {
+            let (mode, accent) = self.saved_theme();
+            theme::apply(ctx, mode, accent);
+            theme::set_source(None);
+            ctx.request_repaint();
+        }
+    }
+
     /// Follow the external theme file across the run — Omarchy switches themes at any
     /// moment, and this is what makes Phoebus recolour in the same second.
     fn poll_theme_file(&mut self, ctx: &egui::Context) {
+        // `external` tracks the file even while following is switched off, so the Settings
+        // toggle knows there is something to offer and flipping it back on applies the
+        // desktop's *current* theme, not the one from when the user left.
         match self.theme_file.poll() {
             Some(ThemeFileEvent::Changed(ext)) => {
                 self.external = Some(ext);
-                self.apply_external(ctx);
+                if self.controller.follow_desktop_theme() {
+                    self.apply_external(ctx);
+                }
             }
             Some(ThemeFileEvent::Removed) => {
                 self.external = None;
-                let (mode, accent) = self.saved_theme();
-                theme::apply(ctx, mode, accent);
-                theme::set_source(None);
-                ctx.request_repaint();
+                if self.controller.follow_desktop_theme() {
+                    let (mode, accent) = self.saved_theme();
+                    theme::apply(ctx, mode, accent);
+                    theme::set_source(None);
+                    ctx.request_repaint();
+                }
             }
             None => {}
         }
@@ -440,6 +470,7 @@ impl Phoebus {
                 let mode = theme::p().mode;
                 self.set_theme(ctx, mode, theme::color(rgb));
             }
+            Action::SetFollowDesktopTheme(follow) => self.set_follow_desktop(ctx, follow),
             Action::SetArtistListW(w) => self.controller.set_artist_list_w(w),
             Action::RaiseWindow => {
                 // A macOS window hidden by its red close button has to come back before
@@ -944,6 +975,8 @@ impl Phoebus {
             .controller
             .configured_library_root()
             .map(str::to_string);
+        let desktop_theme = self.external.is_some();
+        let follow_desktop = self.controller.follow_desktop_theme();
         let Phoebus {
             library,
             artwork,
@@ -965,6 +998,8 @@ impl Phoebus {
             default_root,
             env_override: library_env.as_deref(),
             configured: configured.as_deref(),
+            desktop_theme,
+            follow_desktop,
         };
         let now = controller.now();
         let playlists: &[Playlist] = if demo.is_some() {
@@ -1372,6 +1407,9 @@ impl eframe::App for Phoebus {
         // pause pressed in the background would otherwise sit queued (audibly ignored)
         // until the window next opened. `apply_actions` is a no-op when nothing queued.
         self.media_keys.poll(&self.controller, &mut self.actions);
+        // Widget requests (queue jump, shuffle) are actions on the same terms, and
+        // for the same reason: only `logic` runs while the window is hidden.
+        self.remote.poll(&mut self.actions);
         self.apply_actions(ctx);
         self.shot_autoplay();
         self.tour_setup();
@@ -1384,6 +1422,15 @@ impl eframe::App for Phoebus {
         // on the frames where the window is hidden and `ui` never runs. Changes the *user*
         // made are caught by the second call, at the end of `ui`.
         self.media_keys.sync(&self.controller, &self.library);
+        // After the same settling point as the media-keys sync, and for the same
+        // reason: the published queue must reflect what this pass produced.
+        // `publish` dedupes, so an unchanged queue costs a string build and compare.
+        self.remote.publish(remote::queue_json(
+            &self.library,
+            &self.controller.queue,
+            self.controller.shuffle(),
+            theme::QUEUE_MAX,
+        ));
         // LAST, so it sees the state this pass produced: a track that just ended and
         // advanced is still loaded and keeps ticking; a queue that ran out stops.
         arm_background_repaint(ctx, self.controller.now(), self.scan.is_some());

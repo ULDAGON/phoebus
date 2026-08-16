@@ -2348,6 +2348,7 @@ version = "0.2.1"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
+ "dbus",
  "eframe",
  "egui",
  "egui_extras",
@@ -2359,6 +2360,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "phoebus-audio",
  "phoebus-core",
+ "serde_json",
  "souvlaki",
  "tempfile",
  "winit",
