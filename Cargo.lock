@@ -2344,7 +2344,7 @@ dependencies = [
 
 [[package]]
 name = "phoebus-app"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -2368,7 +2368,7 @@ dependencies = [
 
 [[package]]
 name = "phoebus-audio"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -2378,7 +2378,7 @@ dependencies = [
 
 [[package]]
 name = "phoebus-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "dirs",
