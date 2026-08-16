@@ -213,6 +213,15 @@ fn library_section(ui: &mut Ui, cx: &mut Ctx, st: &mut State, info: &Info) {
 fn theme_section(ui: &mut Ui, cx: &mut Ctx) {
     views::section(ui, "THEME");
 
+    // The desktop is driving (an Omarchy theme file): say so, and from where. The
+    // swatches below still work — a pick lands on top of the desktop's surfaces until
+    // the file next changes — but the file is the reason the palette may not match what
+    // was last chosen here.
+    if let Some(source) = theme::source() {
+        widgets::micro(ui, &format!("FOLLOWING {source}"));
+        ui.add_space(theme::CARD_TEXT_GAP);
+    }
+
     let palette = theme::p();
     widgets::micro(ui, "MODE");
     ui.add_space(4.0);

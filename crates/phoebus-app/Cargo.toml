@@ -21,6 +21,9 @@ anyhow.workspace = true
 log.workspace = true
 env_logger.workspace = true
 
+[dev-dependencies]
+tempfile = "3"
+
 # The Dock icon of an unbundled binary (`cargo run`) can only be set through AppKit —
 # eframe's viewport icon is a *window* icon and macOS has no such thing. winit already
 # links both crates, so this costs no extra compilation; the feature list is the minimum

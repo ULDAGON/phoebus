@@ -561,6 +561,12 @@ impl Controller {
         self.mark_dirty();
     }
 
+    /// The persisted theme choice — what the palette falls back to whenever the external
+    /// theme file ([`crate::theme_file`]) has nothing to say, or goes away.
+    pub fn saved_theme(&self) -> (ThemeMode, Option<[u8; 3]>) {
+        (self.state.theme_mode, self.state.accent_rgb())
+    }
+
     /// The library root the Settings view has configured, as the user typed it (`None` for
     /// "the default"). Not necessarily the *active* root — `$PHOEBUS_LIBRARY` outranks it.
     pub fn configured_library_root(&self) -> Option<&str> {

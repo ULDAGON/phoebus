@@ -196,6 +196,9 @@ pub enum Action {
     /// new width, not the next one. The action exists so the *persisting* still goes
     /// through the app, which is the only thing allowed to talk to the controller.
     SetArtistListW(f32),
+    /// MPRIS `Raise`: bring the window to the front. Raised by a desktop widget's
+    /// "show me the player" click; no in-app control emits it.
+    RaiseWindow,
     /// Move keyboard focus into the sidebar's search field.
     FocusSearch,
     /// Escape: unwind one step, innermost first — the add-songs picker, then a rename,

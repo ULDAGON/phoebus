@@ -2360,6 +2360,7 @@ dependencies = [
  "phoebus-audio",
  "phoebus-core",
  "souvlaki",
+ "tempfile",
  "winit",
 ]
 

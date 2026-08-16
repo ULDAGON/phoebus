@@ -40,6 +40,7 @@ mod nav;
 mod selftest;
 mod shots;
 mod theme;
+mod theme_file;
 mod views;
 mod widgets;
 
@@ -224,7 +225,10 @@ mod tests {
             assert_eq!(viewport.fullsize_content_view, Some(true));
             assert_eq!(viewport.title_shown, Some(false));
             // The traffic lights need room, and there is no title bar left to give it.
-            const { assert!(theme::TITLEBAR_PAD >= 24.0) };
+            // (A runtime assert: a `const` block would be evaluated on every target,
+            // and Linux's TITLEBAR_PAD is 0 — `cfg!` only picks a branch, it does not
+            // stop the other one from compiling.)
+            assert!(theme::TITLEBAR_PAD >= 24.0);
         } else {
             assert_eq!(viewport.titlebar_shown, None);
             assert_eq!(viewport.fullsize_content_view, None);

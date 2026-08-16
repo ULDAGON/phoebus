@@ -19,6 +19,7 @@ use crate::media_keys::MediaKeys;
 use crate::nav::{Action, Ctx, Fmt, Now, View};
 use crate::shots::{self, Capture, Shot, Step, Tour};
 use crate::theme;
+use crate::theme_file::{ThemeFile, ThemeFileEvent};
 use crate::views::{self, ViewState};
 use crate::widgets::{self, menus, player_bar};
 
@@ -86,6 +87,11 @@ pub struct Phoebus {
     playlists_all: Vec<Playlist>,
 
     actions: Vec<Action>,
+    /// The Omarchy bridge: where an external theme file is looked for, and when.
+    theme_file: ThemeFile,
+    /// The last theme that file held. Kept so a Settings pick can re-apply the file's
+    /// surface ramp under the new accent, instead of snapping back to the built-in one.
+    external: Option<theme::ExternalTheme>,
     /// A normal macOS run hides its window instead of exiting when the red close button is
     /// pressed. Screenshot runs still need their `ViewportCommand::Close` to terminate.
     background_on_close: bool,
@@ -106,6 +112,13 @@ impl Phoebus {
         // state is handed to the controller, and applied below through the same setter the
         // Settings view uses, so there is only ever one way to change the palette.
         let (mode, accent) = theme::resolve(&state);
+        // …unless the desktop is offering a theme file (Omarchy): that outranks
+        // `state.json` but not `PHOEBUS_THEME` — `discover` handles the precedence.
+        let mut theme_file = ThemeFile::discover();
+        let external = match theme_file.check() {
+            Some(ThemeFileEvent::Changed(ext)) => Some(ext),
+            _ => None,
+        };
         let playlists = PlaylistStore::load_from(&dirs.playlists_path());
         let view = View::from_state(&state.last_view);
         // A tour must never be audible, whatever the environment says.
@@ -139,6 +152,8 @@ impl Phoebus {
             demo: None,
             playlists_all: Vec::new(),
             actions: Vec::new(),
+            theme_file,
+            external,
             background_on_close,
             shot,
             tour,
@@ -150,7 +165,11 @@ impl Phoebus {
         // `Action::SetArtistListW`.
         app.vstate.artists.list_w = app.controller.artist_list_w();
         // Before the first frame: nothing above this line paints.
-        app.set_theme(&cc.egui_ctx, mode, accent);
+        if app.external.is_some() {
+            app.apply_external(&cc.egui_ctx);
+        } else {
+            app.set_theme(&cc.egui_ctx, mode, accent);
+        }
         app.start_scan();
         app
     }
@@ -162,9 +181,64 @@ impl Phoebus {
     /// to the controller, which persists it through the ordinary `state.json` debounce
     /// (unless `PHOEBUS_THEME` is holding the theme for this run).
     fn set_theme(&mut self, ctx: &egui::Context, mode: phoebus_core::ThemeMode, accent: Color32) {
-        theme::apply(ctx, mode, accent);
+        // While an external theme file is being followed, a Settings pick lands on top of
+        // the file's surfaces rather than snapping back to the built-in ramp; the file
+        // re-asserts the whole theme on its next change.
+        let ramp = self
+            .external
+            .map_or(theme::Ramp::NONE, |ext| ext.ramp_for(mode));
+        theme::apply_with(ctx, mode, accent, ramp);
         self.controller.set_theme(mode, theme::rgb(accent));
         ctx.request_repaint();
+    }
+
+    /// The persisted theme, resolved the way start-up does it — the fallback whenever the
+    /// external theme file has nothing to say.
+    fn saved_theme(&self) -> (phoebus_core::ThemeMode, Color32) {
+        let (mode, accent) = self.controller.saved_theme();
+        let accent = accent.map_or(theme::DEFAULT_ACCENT, |rgb| {
+            theme::migrate(theme::color(rgb))
+        });
+        (mode, accent)
+    }
+
+    /// Paint what the external theme file asks for, filling anything it left unsaid from
+    /// the persisted theme. Never persisted itself: `state.json` keeps the user's own
+    /// choice for the day the file goes away.
+    fn apply_external(&mut self, ctx: &egui::Context) {
+        let Some(ext) = self.external else { return };
+        let (saved_mode, saved_accent) = self.saved_theme();
+        let mode = ext.mode.unwrap_or(saved_mode);
+        let accent = ext.accent.unwrap_or(saved_accent);
+        theme::apply_with(ctx, mode, accent, ext.ramp_for(mode));
+        theme::set_source(self.theme_file.source().map(|p| p.display().to_string()));
+        ctx.request_repaint();
+    }
+
+    /// Follow the external theme file across the run — Omarchy switches themes at any
+    /// moment, and this is what makes Phoebus recolour in the same second.
+    fn poll_theme_file(&mut self, ctx: &egui::Context) {
+        match self.theme_file.poll() {
+            Some(ThemeFileEvent::Changed(ext)) => {
+                self.external = Some(ext);
+                self.apply_external(ctx);
+            }
+            Some(ThemeFileEvent::Removed) => {
+                self.external = None;
+                let (mode, accent) = self.saved_theme();
+                theme::apply(ctx, mode, accent);
+                theme::set_source(None);
+                ctx.request_repaint();
+            }
+            None => {}
+        }
+        // The poll must not wait for user input: an idle window still has to notice a
+        // theme switch. egui takes the minimum of all requests per pass, so this composes
+        // with the 250 ms playback tick instead of fighting it — and it is not armed at
+        // all on a machine with no file to follow.
+        if self.theme_file.active() {
+            ctx.request_repaint_after(Duration::from_millis(theme::THEME_FILE_POLL_MS));
+        }
     }
 
     /// Keep a normal macOS run alive when its window's red close button is pressed.
@@ -367,6 +441,12 @@ impl Phoebus {
                 self.set_theme(ctx, mode, theme::color(rgb));
             }
             Action::SetArtistListW(w) => self.controller.set_artist_list_w(w),
+            Action::RaiseWindow => {
+                // A macOS window hidden by its red close button has to come back before
+                // focus means anything; elsewhere the Visible is a no-op.
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
             Action::FocusSearch => self.focus_search = true,
             Action::Escape => self.escape(),
         }
@@ -1285,6 +1365,7 @@ impl eframe::App for Phoebus {
         self.background_on_macos_close(ctx);
         self.artwork.pump(ctx);
         self.poll_scan();
+        self.poll_theme_file(ctx);
         self.controller.poll(&self.library);
         // Media keys become ordinary actions — and they must be APPLIED here, not left
         // for `ui`: while the window is hidden or minimized only `logic` runs, and a
