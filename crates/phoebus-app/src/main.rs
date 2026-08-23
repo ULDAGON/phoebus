@@ -109,6 +109,10 @@ fn main() -> eframe::Result {
         viewport: frameless(viewport),
         // Mandatory: ViewportCommand::Screenshot never completes under wgpu on macOS.
         renderer: eframe::Renderer::Glow,
+        glow_options: eframe::egui_glow::GlowConfiguration {
+            vsync: !wayland_session(),
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -133,6 +137,31 @@ fn main() -> eframe::Result {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// Is this a Wayland session — the one place where the frame loop must not wait for vsync?
+///
+/// A Wayland client is never told that it is off-screen. winit's `is_visible` and
+/// `is_minimized` both answer `None` there and no `Occluded` event exists, so eframe takes
+/// its ordinary painting path for a window the compositor has stopped showing. Under vsync
+/// that paint blocks inside `eglSwapBuffers`, which waits for a frame callback the
+/// compositor no longer sends: Hyprland sends none to a window on an inactive workspace.
+/// Everything on the main thread stops with it — `xdg_wm_base.ping` goes unanswered (the
+/// compositor's "Application Not Responding" dialog), the media keys and the D-Bus queue
+/// service ([`remote`]) pile up unapplied, and a finished track never advances. Switching
+/// back to the window releases the swap and the whole backlog lands at once.
+///
+/// With `vsync: false` eframe asks glutin for `SwapInterval::DontWait`; the swap returns
+/// without waiting for a callback, and [`app::Phoebus::logic`] keeps its 250 ms tick behind
+/// the hidden window. What vsync also gave — an upper bound on how often the loop paints —
+/// is handed to [`theme::FRAME_MIN_MS`] instead, because egui asks for the next frame the
+/// instant an animation wants one.
+///
+/// The environment variable *is* the test: winit picks its Wayland backend on exactly the
+/// same condition. macOS, Windows and X11 report their window state, so eframe runs its
+/// logic-only path for them while the window is away, and they keep vsync.
+pub fn wayland_session() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
 /// Take the title bar away on macOS (UI-SPEC v1.2 §Window chrome).

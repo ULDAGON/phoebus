@@ -63,8 +63,9 @@ mod imp {
         /// convenience for widgets, never worth failing the app over.
         pub fn new(ctx: &egui::Context) -> Remote {
             let (tx, rx) = crossbeam_channel::unbounded::<RemoteCmd>();
-            let snapshot: Arc<RwLock<String>> =
-                Arc::new(RwLock::new("{\"shuffle\":false,\"upcoming\":[]}".to_string()));
+            let snapshot: Arc<RwLock<String>> = Arc::new(RwLock::new(
+                "{\"shuffle\":false,\"upcoming\":[]}".to_string(),
+            ));
             let served = Arc::clone(&snapshot);
             let ctx = ctx.clone();
             let spawned = std::thread::Builder::new()

@@ -5,7 +5,7 @@
 //! [`Phoebus::logic`], all painting in [`Phoebus::ui`] (API-FACTS §3.1).
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::Receiver;
 use egui::{Align2, Color32, Rect, Sense, Ui, Vec2};
@@ -101,6 +101,11 @@ pub struct Phoebus {
     background_on_close: bool,
     shot: Option<Shot>,
     tour: Option<Tour>,
+    /// The shortest gap between two frame-loop passes, where the loop has to pace itself:
+    /// `Some` exactly when vsync is off ([`crate::wayland_session`]), `None` otherwise.
+    frame_min: Option<Duration>,
+    /// When the last frame-loop pass began, which is what [`frame_delay`] measures from.
+    last_pass: Instant,
 }
 
 impl Phoebus {
@@ -163,6 +168,10 @@ impl Phoebus {
             shot,
             tour,
             root,
+            // Off Wayland vsync still paces the loop, and a second pacer would only make
+            // frames late.
+            frame_min: crate::wayland_session().then(|| Duration::from_millis(theme::FRAME_MIN_MS)),
+            last_pass: Instant::now(),
         };
         // The two top-level panels read their persisted width off the controller every
         // frame; the Artists split is drawn by a view, which never sees the controller, so
@@ -1395,8 +1404,30 @@ fn arm_background_repaint(ctx: &egui::Context, now: Now, scanning: bool) {
     }
 }
 
+/// How long this pass has to wait before it may run, if it has to wait at all.
+///
+/// Where vsync is on, `frame_min` is `None` and the answer is always `None`: the swap
+/// itself paces the loop. Where vsync had to be switched off ([`crate::wayland_session`])
+/// nothing else does. egui asks for the next frame the moment the current one ends for as
+/// long as anything animates — every hover fade, every smooth scroll — and an unpaced loop
+/// answers that as fast as one core can paint. This is the floor that replaces vsync's.
+///
+/// The wait is at most [`theme::FRAME_MIN_MS`], so the compositor's ping still gets its
+/// answer within a frame, and the 250 ms liveness tick is never pushed late by it.
+fn frame_delay(frame_min: Option<Duration>, since_last_pass: Duration) -> Option<Duration> {
+    frame_min
+        .and_then(|min| min.checked_sub(since_last_pass))
+        .filter(|delay| !delay.is_zero())
+}
+
 impl eframe::App for Phoebus {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // FIRST, before anything this pass does: the floor belongs to the whole pass, and
+        // `logic` is the pass's first callback.
+        if let Some(delay) = frame_delay(self.frame_min, self.last_pass.elapsed()) {
+            std::thread::sleep(delay);
+        }
+        self.last_pass = Instant::now();
         self.background_on_macos_close(ctx);
         self.artwork.pump(ctx);
         self.poll_scan();
@@ -1676,6 +1707,25 @@ mod tests {
 
     /// The ceiling UI-SPEC v1.3 §Background liveness puts on a loaded app's wake-ups.
     const CEILING: Duration = Duration::from_millis(theme::REPAINT_MS);
+
+    /// The frame floor waits out the rest of the interval and no more — and never waits at
+    /// all where vsync is still doing that job.
+    #[test]
+    fn the_frame_floor_waits_only_for_what_is_left() {
+        let min = Some(Duration::from_millis(theme::FRAME_MIN_MS));
+        assert_eq!(
+            frame_delay(min, Duration::from_millis(6)),
+            Some(Duration::from_millis(theme::FRAME_MIN_MS - 6))
+        );
+        // A pass that already took its share, or more, starts immediately.
+        assert_eq!(
+            frame_delay(min, Duration::from_millis(theme::FRAME_MIN_MS)),
+            None
+        );
+        assert_eq!(frame_delay(min, Duration::from_secs(1)), None);
+        // Under vsync there is no floor to apply, however fast the passes come.
+        assert_eq!(frame_delay(None, Duration::ZERO), None);
+    }
 
     fn track() -> Now {
         Now {

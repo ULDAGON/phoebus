@@ -996,6 +996,9 @@ pub const MENU_ITEM_PAD: Vec2 = Vec2::new(8.0, 5.0);
 pub const PREV_RESTART_SECS: f32 = 3.0;
 /// Repaint interval while playing.
 pub const REPAINT_MS: u64 = 250;
+/// The floor between two frame-loop passes where vsync is not there to set one
+/// ([`crate::wayland_session`]). 16 ms is about 60 passes a second — the rate vsync gave.
+pub const FRAME_MIN_MS: u64 = 16;
 /// Debounce before `state.json` is rewritten.
 pub const SAVE_DEBOUNCE_MS: u64 = 1000;
 /// How often [`crate::theme_file`] looks at the external theme file. One stat per second:
