@@ -145,8 +145,11 @@ pub fn home_dir() -> PathBuf {
 
 /// Expand a leading `~` (alone, or followed by `/`) against `home`; everything else is
 /// taken verbatim. `~user` is **not** expanded — it is a literal directory name here.
+///
+/// Shell escapes are dropped first: a path dragged from Finder into a terminal arrives as
+/// `Mobile\ Documents/com\~apple\~CloudDocs`, and pasting that spelling must still work.
 pub fn expand_tilde(path: &str, home: &Path) -> PathBuf {
-    let p = path.trim();
+    let p = unescape_shell(path.trim());
     if p == "~" {
         return home.to_path_buf();
     }
@@ -154,6 +157,20 @@ pub fn expand_tilde(path: &str, home: &Path) -> PathBuf {
         Some(rest) => home.join(rest),
         None => PathBuf::from(p),
     }
+}
+
+/// Replace every `\x` with `x`. A backslash at the very end stays.
+fn unescape_shell(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    let mut chars = path.chars();
+    while let Some(c) = chars.next() {
+        out.push(if c == '\\' {
+            chars.next().unwrap_or(c)
+        } else {
+            c
+        });
+    }
+    out
 }
 
 /// `~/.phoebus` — the library root used when nothing is configured.
@@ -420,6 +437,29 @@ mod tests {
             expand_tilde("/a/~/b", home),
             PathBuf::from("/a/~/b"),
             "only a leading tilde expands"
+        );
+    }
+
+    #[test]
+    fn shell_escapes_are_dropped_before_expansion() {
+        let home = Path::new("/home/nobody");
+        assert_eq!(
+            expand_tilde(
+                r"/Users/me/Library/Mobile\ Documents/com\~apple\~CloudDocs/Music",
+                home
+            ),
+            PathBuf::from("/Users/me/Library/Mobile Documents/com~apple~CloudDocs/Music"),
+            "the spelling a terminal produces on drag-and-drop"
+        );
+        assert_eq!(
+            expand_tilde(r"\~/My\ Music", home),
+            PathBuf::from("/home/nobody/My Music"),
+            "an escaped tilde still expands"
+        );
+        assert_eq!(
+            expand_tilde(r"/plain/path\", home),
+            PathBuf::from(r"/plain/path\"),
+            "a trailing backslash escapes nothing and stays"
         );
     }
 
