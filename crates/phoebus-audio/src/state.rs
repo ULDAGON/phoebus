@@ -181,7 +181,7 @@ impl EngineState {
     }
 
     /// Progress events are only interesting while audio is actually moving.
-    pub(crate) fn wants_progress(&self) -> bool {
+    pub(crate) fn is_playing(&self) -> bool {
         self.phase == Phase::Playing
     }
 }
@@ -290,19 +290,19 @@ mod tests {
 
         s.on_loaded(Some(D), false);
         assert_eq!(s.phase(), Phase::Paused);
-        assert!(!s.wants_progress());
+        assert!(!s.is_playing());
 
         assert!(s.on_play());
         assert_eq!(s.phase(), Phase::Playing);
-        assert!(s.wants_progress());
+        assert!(s.is_playing());
 
         assert!(s.on_pause());
         assert_eq!(s.phase(), Phase::Paused);
-        assert!(!s.wants_progress());
+        assert!(!s.is_playing());
 
         s.on_stop();
         assert_eq!(s.phase(), Phase::Idle);
-        assert!(!s.wants_progress());
+        assert!(!s.is_playing());
     }
 
     #[test]
@@ -310,7 +310,7 @@ mod tests {
         let mut s = EngineState::new(1.0);
         s.on_loaded(Some(D), true);
         assert_eq!(s.phase(), Phase::Playing);
-        assert!(s.wants_progress());
+        assert!(s.is_playing());
     }
 
     #[test]
