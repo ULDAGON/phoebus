@@ -1,17 +1,13 @@
-## What's new in v0.3.0
+## What's new in v0.3.1
 
-- **Omarchy theming.** On Linux, Phoebus now follows the [Omarchy](https://omarchy.org)
-  desktop theme live — surfaces, accent, dark/light — switching in the same second as
-  the desktop. Run `contrib/omarchy/install.sh` to set up the bridge.
-- **A theme source toggle.** While a desktop theme is on offer, Settings → THEME grows
-  a `SOURCE` pair: `DESKTOP` (the default) follows it, `STOCK` keeps Phoebus's own
-  dark-blue-and-yellow look. The choice persists.
-- **An Omarchy bar widget.** `phoebus.media` shows a play glyph and the current track
-  whenever Phoebus runs. Left click opens a now-playing panel: cover art, seek bar,
-  transport buttons, a shuffle toggle, and a collapsible up-next list — click a row to
-  jump to it.
-- **A queue service.** Phoebus serves its up-next queue over D-Bus
-  (`org.phoebus.Queue`) for desktop widgets — MPRIS has no queue. Linux only.
+- **Output device changes no longer silence playback.** Unplugging the earphones, or
+  picking another output in Control Centre, used to leave the player "playing" with
+  no sound, and the app could not quit afterwards. Phoebus now follows the system's
+  default output device: playback moves to it within a second and keeps its position
+  and play/pause state.
+- **Shell-escaped paths work in Settings.** A library path pasted from a terminal
+  (`Mobile\ Documents/com\~apple\~CloudDocs`) is accepted as the same directory as its
+  plain spelling.
 
 ## Install
 
