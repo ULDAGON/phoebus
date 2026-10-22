@@ -44,6 +44,23 @@ const MAX_DEPTH: usize = 8;
 /// Longest edge of a cached cover PNG, in pixels.
 pub const COVER_MAX_EDGE: u32 = 600;
 
+/// Held by a scan from the moment it lists the cover cache until its prune is done.
+///
+/// A scan trusts the listing it starts from — a cover on disk then is not written again —
+/// and its prune deletes what its own library does not use. Two scans of one process
+/// overlap only when the app abandons a scan for one of a new root, and the prune of the
+/// old one must not delete covers the new one already counted on. So scans take turns on
+/// the cache. The wait is short: the abandoned scan is cancelled, and it stops at the next
+/// file, writes nothing more and never prunes.
+static COVER_CACHE: Mutex<()> = Mutex::new(());
+
+/// How much older than its scan a cache file must be before that scan's prune may delete
+/// it. Another process (a second Phoebus on the same data dir) does not take
+/// [`COVER_CACHE`], and a file it has just written can carry an mtime from before this scan
+/// began: HFS+ keeps whole seconds, a network share has its own clock. A cover that is
+/// really unused survives at most until the next scan.
+const PRUNE_MARGIN: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Which stage of the scan a [`ScanProgress`] belongs to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ScanPhase {
@@ -149,6 +166,8 @@ pub fn rescan_cancellable<F: FnMut(ScanProgress)>(
     cancelled: impl Fn() -> bool,
     mut progress: F,
 ) -> Library {
+    // This scan's turn on the cover cache, for as long as it reads or changes it.
+    let _cache = COVER_CACHE.lock().unwrap_or_else(|e| e.into_inner());
     // Taken before anything is written: the prune at the end must not delete what a scan
     // running beside this one writes meanwhile (see `prune_covers`).
     let started = SystemTime::now();
@@ -242,7 +261,7 @@ pub fn rescan_cancellable<F: FnMut(ScanProgress)>(
             root.display()
         );
     } else if !cancelled() {
-        prune_covers(covers_dir, &library.cover_ids(), started);
+        prune_covers(covers_dir, &library.cover_ids(), started, &cancelled);
     }
 
     progress(ScanProgress {
@@ -641,16 +660,28 @@ fn restore_covers<F: FnMut(ScanProgress)>(
 /// the per-album files of earlier versions, which share the naming pattern.
 ///
 /// Only files whose name is exactly a cache name ([`CoverId::from_file_name`]) are ever
-/// considered, so nothing else that sits in the directory is touched. And only files older
-/// than `started`, the moment this scan began: the app can abandon a scan of one root for a
-/// scan of another, both write into the same cache, and a file written meanwhile may be the
-/// other scan's.
-fn prune_covers(dir: &Path, keep: &HashSet<CoverId>, started: SystemTime) {
+/// considered, so nothing else that sits in the directory is touched. Only files older
+/// than `started`, the moment this scan began, by [`PRUNE_MARGIN`]: a file written since
+/// may be another process's (scans of this one take turns, [`COVER_CACHE`]). And it stops
+/// the moment `cancelled` says so, between two files: a scan abandoned while it prunes
+/// deletes nothing more.
+fn prune_covers(
+    dir: &Path,
+    keep: &HashSet<CoverId>,
+    started: SystemTime,
+    cancelled: &impl Fn() -> bool,
+) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
+    let cutoff = started
+        .checked_sub(PRUNE_MARGIN)
+        .unwrap_or(SystemTime::UNIX_EPOCH);
     let mut removed = 0usize;
     for entry in entries.filter_map(Result::ok) {
+        if cancelled() {
+            break;
+        }
         let Some(id) = entry.file_name().to_str().and_then(CoverId::from_file_name) else {
             continue;
         };
@@ -660,7 +691,7 @@ fn prune_covers(dir: &Path, keep: &HashSet<CoverId>, started: SystemTime) {
         let Ok(meta) = entry.metadata() else {
             continue;
         };
-        if !meta.is_file() || meta.modified().map_or(true, |at| at >= started) {
+        if !meta.is_file() || meta.modified().map_or(true, |at| at >= cutoff) {
             continue;
         }
         match fs::remove_file(entry.path()) {
@@ -966,6 +997,17 @@ mod tests {
         album.covers[0]
     }
 
+    /// Make every file in `dir` look long written — what the time between two real scans
+    /// does, so the prune's margin for fresh files does not apply.
+    fn age_cache(dir: &Path) {
+        for name in cache_files(dir) {
+            set_mtime(
+                &dir.join(name),
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000),
+            );
+        }
+    }
+
     /// The cache files in `dir`, sorted.
     fn cache_files(dir: &Path) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(dir)
@@ -1012,8 +1054,9 @@ mod tests {
             "an existing cover must not be rewritten on every scan"
         );
 
-        // The user re-tags the album with different art: a new id, a new file, and the
-        // old file is gone.
+        // The user re-tags the album with different art, some time later: a new id, a
+        // new file, and the old file is gone.
+        age_cache(&lib.covers_dir());
         write_wav_with_cover(&file, 300, 200);
         let lib = scan(root);
         let second = only_cover(&lib);
@@ -1025,6 +1068,7 @@ mod tests {
         assert!(!dest.exists(), "the old art's file must go");
 
         // The user strips the artwork: the PNG must not keep being painted.
+        age_cache(&lib.covers_dir());
         write_wav(&file, 300);
         let lib = scan(root);
         assert!(
@@ -1120,26 +1164,60 @@ mod tests {
             "nothing else is touched"
         );
 
-        // A file written after the scan began may be another scan's: it stays.
-        let started = SystemTime::now();
+        // A file written after the scan began may be another scan's: it stays — and so
+        // does one that only looks a little older, as a coarse or skewed mtime can.
         let fresh = covers.path().join("00000000000000ab.png");
         write_cover_png(&png_bytes(8), &fresh).expect("fresh cover");
-        prune_covers(
-            covers.path(),
-            &lib.cover_ids(),
-            started - Duration::from_secs(60),
-        );
+        let keep = lib.cover_ids();
+        let now = SystemTime::now();
+        prune_covers(covers.path(), &keep, now - Duration::from_secs(60), &|| {
+            false
+        });
+        assert!(fresh.exists(), "younger than the scan");
+        set_mtime(&fresh, now - Duration::from_secs(5));
+        prune_covers(covers.path(), &keep, now, &|| false);
         assert!(
             fresh.exists(),
-            "younger than the scan, so not this scan's to delete"
+            "within the margin: perhaps another process's"
         );
-        prune_covers(
-            covers.path(),
-            &lib.cover_ids(),
-            SystemTime::now() + Duration::from_secs(60),
+        // A cancelled prune deletes nothing.
+        let later = now + PRUNE_MARGIN + Duration::from_secs(60);
+        prune_covers(covers.path(), &keep, later, &|| true);
+        assert!(
+            fresh.exists(),
+            "a cancelled prune stops before the first file"
         );
-        assert!(!fresh.exists(), "older than the scan and unused");
+        prune_covers(covers.path(), &keep, later, &|| false);
+        assert!(
+            !fresh.exists(),
+            "older than the scan by the margin, and unused"
+        );
         assert!(lib.cover_path(cover).exists(), "a used cover always stays");
+    }
+
+    /// Scans take turns on the cover cache: one that starts while another holds it waits,
+    /// so the other's prune can never delete covers it has already counted on.
+    #[test]
+    fn scans_take_turns_on_the_cover_cache() {
+        let music = tempfile::tempdir().expect("tempdir");
+        let covers = tempfile::tempdir().expect("tempdir");
+        write_wav_with_cover(&music.path().join("HOME/Odyssey/01 Intro.wav"), 200, 40);
+        let turn = COVER_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        std::thread::scope(|s| {
+            let other = s.spawn(|| scan_with_covers(music.path(), covers.path()));
+            std::thread::sleep(Duration::from_millis(200));
+            assert!(!other.is_finished(), "the second scan waits for its turn");
+            assert!(
+                cache_files(covers.path()).is_empty(),
+                "…before it touches the cache"
+            );
+            drop(turn);
+            let lib = other.join().expect("scan");
+            assert_eq!(
+                cache_files(covers.path()),
+                vec![only_cover(&lib).file_name()]
+            );
+        });
     }
 
     /// An unmounted drive scans as an unreadable root, an emptied mount point as a root
@@ -1152,12 +1230,7 @@ mod tests {
         write_wav_with_cover(&root.join("HOME/Odyssey/01 Intro.wav"), 200, 40);
         let lib = scan_with_covers(&root, covers.path());
         let cover = only_cover(&lib);
-        for name in cache_files(covers.path()) {
-            set_mtime(
-                &covers.path().join(name),
-                SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000),
-            );
-        }
+        age_cache(covers.path());
 
         // The volume is gone: the root itself cannot be read.
         fs::rename(&root, music.path().join("Elsewhere")).expect("unmount");
