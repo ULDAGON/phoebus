@@ -1360,7 +1360,7 @@ impl Phoebus {
             Step::Recently => self.view = View::RecentlyAdded,
             Step::Albums => self.view = View::Albums,
             Step::Album => {
-                if let Some(key) = self.library.albums().first().cloned() {
+                if let Some(key) = shots::tour_album(&self.library) {
                     self.view = View::Album(key);
                 }
             }
@@ -1385,7 +1385,7 @@ impl Phoebus {
                 }
             }
             Step::Search => {
-                self.search = shots::TOUR_QUERY.to_string();
+                self.search = shots::tour_query();
                 self.vstate.search.invalidate();
                 self.view = View::Search;
             }
@@ -1506,9 +1506,9 @@ impl Phoebus {
         self.rebuild_playlists();
     }
 
-    /// Load the first album's first track, park it paused at 30 s, and fill the drawer.
+    /// Load the tour album's first track, park it paused at 30 s, and fill the drawer.
     fn tour_playing(&mut self) {
-        let Some(key) = self.library.albums().first().cloned() else {
+        let Some(key) = shots::tour_album(&self.library) else {
             return;
         };
         let tracks = self.library.album_tracks(&key).to_vec();
