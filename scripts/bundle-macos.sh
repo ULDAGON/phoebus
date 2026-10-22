@@ -20,7 +20,8 @@
 # the plate, the shading and the shadow — and an app that offers nothing but an `.icns` is
 # assumed to be pre-Tahoe art that already has a plate baked in, so Tahoe shrinks it to
 # about ⅔ and centres it on a grey system plate. That is measurable, not folklore: the
-# mark spans 408 px of a 1024 px icon that way, against 604 px for a Tahoe-native one.
+# previous mark spanned 408 px of a 1024 px icon that way, against 604 px for a
+# Tahoe-native one.
 #
 # The fix is to hand Tahoe the artwork *without* a plate and let it do its own compositing,
 # which is what `assets/icon/Phoebus.icon` is and what `CFBundleIconName` points at. Both

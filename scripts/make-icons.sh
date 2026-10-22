@@ -12,20 +12,22 @@
 #          assets/icon/hicolor/<N>x<N>/apps/phoebus.png   Linux hicolor set
 #          assets/icon/phoebus-256.png      the plate PNG compiled into the binary
 #                                           (window icon everywhere, Dock icon on macOS)
+#          assets/icon/Phoebus.icon/Assets/{field,mark}-grain.png
+#                                           the grain layers of the macOS 26 icon
 #
-# All three are committed, so building Phoebus from source needs none of the tools below —
+# All of them are committed, so building Phoebus from source needs none of the tools below —
 # this script only has to run when the SVGs change.
 #
-# The macOS 26 icon is not here. Tahoe wants artwork with no plate on it and composites the
-# plate itself, so it gets its own source — assets/icon/Phoebus.icon, hand-written and
-# committed as-is — which scripts/bundle-macos.sh compiles with actool at bundle time.
-# Nothing about it is a raster this script could produce, and actool's output cannot be
-# committed: it orders its assets by a hash that moves between runs.
+# The rest of the macOS 26 icon is not here. Tahoe wants artwork with no plate on it and
+# composites the plate itself, so it gets its own source — assets/icon/Phoebus.icon, its
+# icon.json and mark.svg hand-written — which scripts/bundle-macos.sh compiles with actool
+# at bundle time. actool's output cannot be committed: it orders its assets by a hash that
+# moves between runs.
 #
-# Requires rsvg-convert (brew install librsvg) plus iconutil and sips, which ship with
-# macOS. Without a Mac you can still refresh the hicolor set and the window icon; only the
-# .icns step needs iconutil. Output is deterministic: running it twice leaves every file
-# byte-identical, so a no-op run shows up as an empty `git diff`.
+# Requires rsvg-convert (brew install librsvg) plus iconutil, which ships with macOS.
+# Without a Mac you can still refresh everything but the .icns. Output is deterministic:
+# running it twice leaves every file byte-identical, so a no-op run shows up as an empty
+# `git diff`.
 #
 set -euo pipefail
 
@@ -87,3 +89,17 @@ echo "make-icons: hicolor 32,48,64,128,256,512 -> $icons/hicolor"
 # square would sit in the Dock as a hard-edged tile.
 render "$plate" 256 "$icons/phoebus-256.png"
 echo "make-icons: $icons/phoebus-256.png ($(wc -c <"$icons/phoebus-256.png" | tr -d ' ') bytes)"
+
+# ---- macOS 26: the grain layers of Phoebus.icon -----------------------------------------
+# icon.json has no noise of its own, so the grain goes in as two PNG layers that icon.json
+# blends with `overlay` at 0.6. They come from phoebus-square.svg because the .icon canvas
+# is full-bleed too. The stylesheet hides everything but the one group and drops its
+# opacity and blend mode, which would otherwise be applied twice. (`--export-id` would be
+# the obvious tool, but librsvg 2.63 renders a filtered element empty with it.)
+for layer in field-grain mark-grain; do
+	rsvg-convert -w 1024 -h 1024 -s <(
+		echo "svg > :not(defs, #$layer) { display: none }"
+		echo "#$layer { opacity: 1 !important; mix-blend-mode: normal !important }"
+	) "$square" -o "$icons/Phoebus.icon/Assets/$layer.png"
+done
+echo "make-icons: field-grain, mark-grain -> $icons/Phoebus.icon/Assets"

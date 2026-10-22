@@ -11,14 +11,15 @@ icon/phoebus.svg              the source artwork: Big Sur plate, 824 body in a 1
 icon/phoebus-square.svg       the same mark full-bleed, no plate, no margin
 icon/Phoebus.icon/            the source artwork again, as macOS 26 wants it: icon.json
                               plus Assets/mark.svg, the mark on nothing
-icon/reference.jpg            the raster they were measured off, kept as the design reference
+icon/Phoebus.icon/Assets/*-grain.png
+                              generated — the grain layers of the macOS 26 icon
 icon/Phoebus.icns             generated — the macOS 11…15 bundle icon, 16…1024 with @2x pairs
 icon/hicolor/<N>x<N>/apps/    generated — the Linux icon theme set, 32/48/64/128/256/512
 icon/phoebus-256.png          generated — compiled into the binary (window + Dock icon)
 linux/phoebus.desktop         the launcher entry template
 ```
 
-The three generated groups come from `scripts/make-icons.sh`, which needs `rsvg-convert`
+The generated files come from `scripts/make-icons.sh`, which needs `rsvg-convert`
 (`brew install librsvg` / `apt install librsvg2-bin`) plus macOS's `iconutil` for the
 `.icns`. They are committed so nobody building from source has to install any of that —
 re-run the script only when an SVG changes. On one machine, one librsvg, it is
@@ -43,13 +44,13 @@ and centres it on a grey system plate of its own. The result is a small dark til
 inside a bigger pale one, which is exactly what it looks like.
 
 The numbers, measured off what `NSWorkspace` hands back for a registered bundle, rendered
-at 1024: with only an `.icns`, the yellow mark spans 408 px. With `Assets.car`, 604 px —
-which is the size it is drawn at, and the same fraction of the plate that Music.app and
-Podcasts.app give their glyphs. Both put the plate at 824 px of 1024, the macOS grid.
+at 1024, with the previous mark: with only an `.icns`, its ring spanned 408 px. With
+`Assets.car`, 604 px — which is the size it is drawn at. Both put the plate at 824 px of
+1024, the macOS grid. The current mark has not been measured that way.
 
-So the `.icon` carries the mark on a flat navy field and no plate at all, and lets Tahoe do
-the compositing. `scripts/bundle-macos.sh` compiles it with `actool`, which ships inside
-Xcode; a machine with only the Command Line Tools still gets a bundle, just one that
+So the `.icon` carries the mark on the background gradient and no plate at all, and lets
+Tahoe do the compositing. `scripts/bundle-macos.sh` compiles it with `actool`, which ships
+inside Xcode; a machine with only the Command Line Tools still gets a bundle, just one that
 Tahoe's Dock shrinks. `Assets.car` is not committed like the other generated files because
 it cannot be: `actool` serialises the archive in an order that varies between runs, so the
 file differs byte for byte every time even when nothing changed.
@@ -83,38 +84,57 @@ lets the shell attach a running window to the launcher entry.
 
 ## The artwork
 
-Two colours derived from `icon/reference.jpg`: blue-black `#0B121A` and neon yellow `#FEFB54`.
-The background is an almost-black version of the reference navy; the yellow is unchanged
-and flat wherever it appears. The blue-black is not flat: both SVGs fill their background
-with a vertical gradient from `#111A24` down to `#0B121A` — dark enough to read as black,
-with just enough blue tint and tonal movement to keep the field alive — and the plate
-variant adds a hairline rim light along its top edge, white at 13 % opacity fading to
-nothing by mid-height, a 4 px
-stroke clipped to the plate so only its inner half shows. The full-bleed square has the
-gradient and no rim; it has no edge for a light to catch. The yellow is deliberately *not*
-the app's `#FFFB00` accent — the icon is the brand mark, the accent is a UI token, and they
-are allowed to differ.
+A blue-black field and a neon yellow mark, both slightly graded and both grained:
 
-`icon.json` restates the same background gradient and yellow as its `fill` and one layer's
-`fill`, because the `.icon` format keeps colour in the document and not in the artwork —
-`Assets/mark.svg` is a stencil, and Icon Composer paints it. The rim light has no
-counterpart there and does not need one: Tahoe lights the edge itself.
+- **Field:** a linear gradient from `#12161C` to `#222D3D` along a line 15° off vertical
+  through the centre, so it lightens towards the top right. Its ends are half a body (the
+  plate, or the whole canvas) from the centre, so the corners beyond them are flat.
+- **Mark:** a radial gradient from `#FFF46A` at the centre to `#FFF829` at 1.15 × the
+  ring's outer radius — nearly flat.
+- **Grain:** grey fractal noise (`feTurbulence`) blended with `overlay` at 60 % opacity,
+  one layer on the field (base frequency 0.35, seed 7) and one masked to the mark (0.71,
+  seed 13). The frequency is per user unit and the same in both SVGs: the grain is a
+  texture, not geometry, so it does not scale with the body.
+- **Rim light**, plate only: white at 23 % opacity along the top edge, fading to nothing by
+  y = 600, a 4 px stroke clipped to the plate so only its inner half shows. The full-bleed
+  square has no edge for a light to catch.
 
-Neither SVG is a trace of the reference. Every number below was measured off it and the
-shapes re-drawn from those measurements, which is why the geometry can be stated as exact
-fractions at all.
+The yellow is deliberately *not* the app's `#FFFB00` accent — the icon is the brand mark,
+the accent is a UI token, and they are allowed to differ.
 
-Geometry, as fractions of the plate (or of the whole canvas, for the full-bleed variant):
-ring outer diameter 86.2 % with a 13.5 % stroke; the play triangle equilateral with corner
-radius 10 % of the ring's inner radius. Its reference geometry is scaled to 85 % about the
-ring centre, creating an even gap between all three rounded corners and the ring.
+Geometry, as fractions of the body (the 824 plate, or the whole 1024 canvas for the
+full-bleed variant): ring outer diameter 68.2 % with a 12 % stroke; the play triangle
+equilateral, pointing right, its centroid on the ring centre, its circumradius 0.89 of the
+ring's inner radius and its corners rounded to 5 % of the circumradius. On the plate that
+is a ring of radius 231.54 at the stroke centre and width 98.88, and a triangle of
+circumradius 162.07; the full-bleed values are those scaled by 1024 / 824.
 
-`Assets/mark.svg` is that mark after the 0.85 shrink the other two apply with a transform,
-with the ring baked into the path data instead: outer radius 375.14, inner 257.63, 73.2 %
-of the canvas across. It has no strokes at all — Icon Composer flattens a stroked shape to
-the whole region its outline encloses, which turns the ring into a solid disc — so the ring
-is an even-odd annulus of two circles. Its triangle carries the same separate 0.85 transform
-as the other variants.
+`Assets/mark.svg` is the full-bleed mark, because Tahoe draws the `.icon` canvas whole at
+the size of its plate: outer radius 349.18, inner 226.30, 68.2 % of the canvas across. It
+has no strokes at all — Icon Composer flattens a stroked shape to the whole region its
+outline encloses, which turns the ring into a solid disc — so the ring is an even-odd
+annulus of two circles.
+
+`icon.json` restates the colours, because the `.icon` format keeps colour in the document
+and not in the artwork — `mark.svg` is a stencil, and Icon Composer paints it:
+
+- The background `fill` is the field gradient, vertical and lightest at the top, so its
+  colours are listed light first. actool ignores an `orientation` key on this fill: with
+  one, and with its y values swapped, the compiled icon came out the same, first colour
+  on top. The 15° tilt of the SVGs is lost; the tilt is small and the light stays on top.
+- The mark layer's `fill` is solid `#FFF73B`, the radial gradient's colour at the ring's
+  stroke centre: `icon.json` has no radial fill.
+- The grain is the two PNG layers `scripts/make-icons.sh` renders from the full-bleed SVG.
+  `mark-grain.png` sits above the mark in its group with `blend-mode` `overlay` and
+  `opacity` 0.6. `field-grain.png` has a group of its own below the mark, and the group
+  carries the `overlay` and the 0.6 so that they apply to the background; its shadow,
+  specular highlight and translucency are off.
+- The rim light has no counterpart and does not need one: Tahoe lights the edge itself.
+
+Apple publishes no schema for `icon.json`. Every key above is one that Icon Composer writes
+into the `.icon` documents of public repositories, and Xcode 26.6's actool compiles this
+document without a warning. Rendered through `NSWorkspace` from the compiled `Assets.car`,
+the field runs from `#222D3D` at the top to `#12161C` at the bottom, with the grain on it.
 
 The plate outline is traced from macOS 26 itself, not drawn from a formula: the mask the
 system composites for its own apps (IconServices' 1024 px render of Music.app) was sampled

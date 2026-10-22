@@ -3,31 +3,55 @@
   <title>Phoebus</title>
 
   <!--
-    The full-bleed variant: the same mark on an edge-to-edge navy field, no plate and no
-    transparent margin. This is what Linux desktops want (they draw their own frame, if
-    any) and it is also the source for the embedded window icon.
+    The full-bleed variant: phoebus.svg with the plate's 824 body stretched to the whole
+    canvas, no plate, no transparent margin and no rim light. This is what Linux desktops
+    want (they draw their own frame, if any), it is the source for the embedded window
+    icon, and scripts/make-icons.sh exports its two grain layers by id for
+    Phoebus.icon.
 
-    Proportions are assets/icon/reference.jpg's, measured against the whole canvas:
-      ring   outer diameter 86.2 %, stroke 13.5 %  ->  r 372.22, stroke-width 138.24
-      play   the reference's rounded equilateral triangle, scaled to 85 % about the centre
-             so its corners leave an even gap from the ring.
+    Every geometric value is phoebus.svg's scaled by 1024 / 824 about the centre:
+      ring   r 287.74 (stroke centre), width 122.88
+      play   circumradius 201.41, corner radius 10.07
+    The grain keeps phoebus.svg's frequencies: it is a texture, not geometry.
   -->
 
   <defs>
-    <linearGradient id="field" x1="512" y1="0" x2="512" y2="1024" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#111A24"/>
-      <stop offset="1" stop-color="#0B121A"/>
+    <linearGradient id="field-fill" x1="379.48" y1="1006.55" x2="644.52" y2="17.45" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#12161C"/>
+      <stop offset="1" stop-color="#222D3D"/>
     </linearGradient>
+
+    <radialGradient id="mark-fill" cx="512" cy="512" r="401.56" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFF46A"/>
+      <stop offset="1" stop-color="#FFF829"/>
+    </radialGradient>
+
+    <g id="mark">
+      <circle cx="512" cy="512" r="287.74" fill="none" stroke-width="122.88"/>
+      <path stroke="none" d="M 698.30 503.28 A 10.07 10.07 0 0 1 698.30 520.72 L 426.40 677.71 A 10.07 10.07 0 0 1 411.29 668.98 L 411.29 355.02 A 10.07 10.07 0 0 1 426.40 346.29 Z"/>
+    </g>
+
+    <mask id="mark-mask">
+      <use href="#mark" fill="white" stroke="white"/>
+    </mask>
+
+    <filter id="field-noise" x="0" y="0" width="1024" height="1024" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.35" numOctaves="2" seed="7" stitchTiles="stitch"/>
+      <feColorMatrix values="1 0 0 0 0  1 0 0 0 0  1 0 0 0 0  0 0 0 0 1"/>
+    </filter>
+    <filter id="mark-noise" x="0" y="0" width="1024" height="1024" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.71" numOctaves="2" seed="13" stitchTiles="stitch"/>
+      <feColorMatrix values="1 0 0 0 0  1 0 0 0 0  1 0 0 0 0  0 0 0 0 1"/>
+    </filter>
   </defs>
 
-  <rect width="1024" height="1024" fill="url(#field)"/>
+  <rect width="1024" height="1024" fill="url(#field-fill)"/>
+  <g id="field-grain" opacity="0.6" style="mix-blend-mode:overlay">
+    <rect width="1024" height="1024" filter="url(#field-noise)"/>
+  </g>
 
-  <!-- The mark sits at 0.85 of its measured size, matching phoebus.svg's shrink: the
-       full-size ring (86.2 % of the canvas) crowds the edges once desktops frame the
-       tile, so the group is scaled down about the canvas centre (~73 % now). -->
-  <g fill="#FEFB54" transform="translate(512 512) scale(0.85) translate(-512 -512)">
-    <circle cx="512" cy="512" r="372.22" fill="none" stroke="#FEFB54" stroke-width="138.24"/>
-    <path transform="translate(512 512) scale(0.85) translate(-512 -512)"
-          d="M 799.94 538.25 L 390.76 774.49 A 30.31 30.31 0 0 1 345.30 748.24 L 345.29 275.76 A 30.31 30.31 0 0 1 390.76 249.51 L 799.94 485.75 A 30.31 30.31 0 0 1 799.94 538.25 Z"/>
+  <use href="#mark" fill="url(#mark-fill)" stroke="url(#mark-fill)"/>
+  <g id="mark-grain" opacity="0.6" style="mix-blend-mode:overlay">
+    <rect width="1024" height="1024" filter="url(#mark-noise)" mask="url(#mark-mask)"/>
   </g>
 </svg>
