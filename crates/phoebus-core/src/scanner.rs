@@ -116,6 +116,24 @@ pub fn rescan_with_covers_progress<F: FnMut(ScanProgress)>(
     root: &Path,
     covers_dir: &Path,
     known: impl IntoIterator<Item = Track>,
+    progress: F,
+) -> Library {
+    rescan_cancellable(root, covers_dir, known, || false, progress)
+}
+
+/// [`rescan_with_covers_progress`] that can be called off.
+///
+/// `cancelled` is polled between files and between albums. Once it says yes the scan stops
+/// reading and, above all, stops touching `covers_dir` — the cover cache is shared by every
+/// scan of the run, so a scan the app has given up on (its library root changed) must not
+/// keep deleting and rewriting covers the new root's library is using. What comes back is
+/// then an incomplete library that the caller must throw away; at most the one cover
+/// already being written is still finished, atomically.
+pub fn rescan_cancellable<F: FnMut(ScanProgress)>(
+    root: &Path,
+    covers_dir: &Path,
+    known: impl IntoIterator<Item = Track>,
+    cancelled: impl Fn() -> bool,
     mut progress: F,
 ) -> Library {
     progress(ScanProgress {
@@ -141,6 +159,9 @@ pub fn rescan_with_covers_progress<F: FnMut(ScanProgress)>(
         .filter_entry(|e| !is_hidden(e) && e.path() != covers_dir);
 
     for entry in walker {
+        if cancelled() {
+            break;
+        }
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
@@ -176,7 +197,7 @@ pub fn rescan_with_covers_progress<F: FnMut(ScanProgress)>(
     );
 
     let library = Library::build_with_covers(root.to_path_buf(), covers_dir.to_path_buf(), tracks);
-    refresh_covers(root, covers_dir, &library, &mut progress);
+    refresh_covers(root, covers_dir, &library, &cancelled, &mut progress);
 
     progress(ScanProgress {
         phase: ScanPhase::Done,
@@ -196,6 +217,10 @@ struct FileStamp {
     /// track can never be reused.
     mtime: Option<SystemTime>,
     size: u64,
+    /// Some permission bit lets someone read the file. Without one (`chmod 000`) the file
+    /// cannot have stayed readable: neither size nor mtime moves on a `chmod`, so this is
+    /// the only trace it leaves in the `stat` the walk already has. Always true off Unix.
+    readable: bool,
 }
 
 impl FileStamp {
@@ -206,22 +231,39 @@ impl FileStamp {
             Ok(m) => FileStamp {
                 mtime: m.modified().ok(),
                 size: m.len(),
+                readable: has_read_bit(&m),
             },
             Err(e) => {
                 log::warn!("scan: no metadata for {} ({e})", entry.path().display());
                 FileStamp {
                     mtime: None,
                     size: 0,
+                    readable: false,
                 }
             }
         }
     }
 
     /// Same size and same mtime, to the nanosecond: the file has not been written since
-    /// `track` was read from it.
+    /// `track` was read from it. And still readable, so a file that became unreadable is
+    /// read again — and skipped, as a full scan would skip it — instead of staying listed
+    /// with a track nobody can play.
     fn matches(self, track: &Track) -> bool {
-        self.mtime == Some(track.added_at) && self.size == track.size
+        self.readable && self.mtime == Some(track.added_at) && self.size == track.size
     }
+}
+
+/// Whether any of the owner, group or other read bits is set. A cheap stand-in for "can be
+/// opened": it needs no `open`, only the metadata in hand.
+#[cfg(unix)]
+fn has_read_bit(m: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    m.permissions().mode() & 0o444 != 0
+}
+
+#[cfg(not(unix))]
+fn has_read_bit(_: &fs::Metadata) -> bool {
+    true
 }
 
 /// Dot-files and dot-directories are skipped — including `<root>/.phoebus`, the app's own
@@ -333,9 +375,10 @@ fn refresh_covers<F: FnMut(ScanProgress)>(
     root: &Path,
     covers_dir: &Path,
     library: &Library,
+    cancelled: &impl Fn() -> bool,
     progress: &mut F,
 ) {
-    if library.album_count() == 0 {
+    if library.album_count() == 0 || cancelled() {
         return;
     }
     if let Err(e) = fs::create_dir_all(covers_dir) {
@@ -345,6 +388,9 @@ fn refresh_covers<F: FnMut(ScanProgress)>(
 
     let total = library.album_count();
     for (i, key) in library.albums().iter().enumerate() {
+        if cancelled() {
+            return;
+        }
         let Some(album) = library.album(key) else {
             continue;
         };
@@ -919,6 +965,81 @@ mod tests {
             again.is_empty(),
             "the corrupted file is skipped, not reused"
         );
+    }
+
+    /// A `chmod` moves neither size nor mtime, so an unreadable file would sail through the
+    /// stamp check and stay in the library as a track that cannot be played.
+    #[cfg(unix)]
+    #[test]
+    fn a_rescan_does_not_reuse_a_file_that_lost_its_read_permission() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let file = root.join("HOME/Odyssey/01 Intro.wav");
+        write_wav(&file, 300);
+        write_wav(&root.join("HOME/Odyssey/02 Outro.wav"), 300);
+        let first = scan(root);
+        assert_eq!(first.track_count(), 2);
+
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).expect("chmod");
+        let again = rescan_with_covers_progress(
+            root,
+            &paths::Dirs::inside(root).covers_dir(),
+            marked(&first),
+            |_| {},
+        );
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).expect("chmod back");
+
+        // Read again, not taken over: a full scan drops it (or, as root, which can open
+        // anything, lists it with freshly read tags — never with the marked ones).
+        assert_ne!(
+            genre_of(&again, "HOME/Odyssey/01 Intro.wav").as_deref(),
+            Some("FROM THE LAST SCAN")
+        );
+        assert_eq!(
+            genre_of(&again, "HOME/Odyssey/02 Outro.wav").as_deref(),
+            Some("FROM THE LAST SCAN"),
+            "a readable neighbour is still reused"
+        );
+    }
+
+    /// A scan the app gave up on must not touch the shared cover cache any more.
+    #[test]
+    fn a_cancelled_scan_stops_writing_covers() {
+        let music = tempfile::tempdir().expect("tempdir");
+        let data = tempfile::tempdir().expect("tempdir");
+        let covers = data.path().join("covers");
+        let root = music.path();
+        write_wav_with_cover(&root.join("HOME/Odyssey/01 Intro.wav"), 300, 100);
+        write_wav_with_cover(&root.join("Woodkid/S16/01 Goliath.wav"), 300, 100);
+        let cover_files = || fs::read_dir(&covers).map_or(0, |d| d.count());
+
+        let lib = rescan_cancellable(root, &covers, Vec::new(), || true, |_| {});
+        assert_eq!(
+            cover_files(),
+            0,
+            "cancelled before it began: no cover cache"
+        );
+        assert_eq!(lib.track_count(), 0, "…and no more reading either");
+
+        // Cancelled while it extracts: the album in hand is finished, the next is not.
+        let cancel = std::cell::Cell::new(false);
+        rescan_cancellable(
+            root,
+            &covers,
+            Vec::new(),
+            || cancel.get(),
+            |p| {
+                if p.phase == ScanPhase::Artwork {
+                    cancel.set(true);
+                }
+            },
+        );
+        assert_eq!(cover_files(), 1);
+
+        // Not cancelled: both.
+        scan_with_covers(root, &covers);
+        assert_eq!(cover_files(), 2);
     }
 
     /// End to end with the snapshot: what a scan saves, the next launch loads, and a

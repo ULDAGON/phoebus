@@ -60,8 +60,9 @@ pub use paths::{
 pub use playlists::{Playlist, PlaylistStore};
 pub use queue::{AdvanceReason, PlayQueue, Repeat, UpNext};
 pub use scanner::{
-    AUDIO_EXTENSIONS, COVER_MAX_EDGE, ScanPhase, ScanProgress, rescan_with_covers_progress, scan,
-    scan_with_covers, scan_with_covers_progress, scan_with_progress,
+    AUDIO_EXTENSIONS, COVER_MAX_EDGE, ScanPhase, ScanProgress, rescan_cancellable,
+    rescan_with_covers_progress, scan, scan_with_covers, scan_with_covers_progress,
+    scan_with_progress,
 };
 pub use search::{SECTION_CAP, SearchResults, filter_tracks, search, search_capped};
 pub use state::{
