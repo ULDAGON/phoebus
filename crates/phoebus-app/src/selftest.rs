@@ -1,10 +1,11 @@
 //! `phoebus --selftest` — Gate G2's acceptance test, run headless.
 //!
 //! It touches no egui and opens no window. It scans the library, checks the tags, durations
-//! and cached covers it found, drives the real audio engine at volume 0 through a decode +
-//! seek probe, and round-trips playlists, favorites and app state **against temporary
-//! directories** so a self-test can never disturb the user's `playlists.json` or
-//! `favorites.json`.
+//! and cached covers it found, round-trips the library snapshot and times the launch path
+//! it enables (load + incremental rescan, against the full scan it replaces), drives the
+//! real audio engine at volume 0 through a decode + seek probe, and round-trips playlists,
+//! favorites and app state **against temporary directories** so a self-test can never
+//! disturb the user's `playlists.json`, `favorites.json` or `library.json`.
 //!
 //! Every check prints one `PASS <name> <detail>` or `FAIL <name> <detail>` line; the exit
 //! code is 1 if anything failed.
@@ -22,7 +23,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use phoebus_audio::{Event, EventKind, PlayerHandle};
-use phoebus_core::{AppState, Dirs, Favorites, Library, PlaylistStore, Repeat, TrackId, scanner};
+use phoebus_core::{
+    AppState, Dirs, Favorites, Library, PlaylistStore, Repeat, TrackId, scanner, snapshot,
+};
 
 /// Comma-separated `albums,artists,tracks` minimums for the scan checks.
 ///
@@ -85,10 +88,13 @@ pub fn run() -> i32 {
         }
     };
     // Covers go to the active data dir and nowhere else — the library root is never written.
+    let started = Instant::now();
     let library = scanner::scan_with_covers(&root, &dirs.covers_dir());
+    let full_scan = started.elapsed();
 
     check_scan(&mut report, &library, expect);
     check_albums(&mut report, &library);
+    check_snapshot(&mut report, &library, &dirs, full_scan);
     check_audio(&mut report, &library);
     check_playlists(&mut report, &library);
     check_reorder(&mut report, &library);
@@ -213,20 +219,127 @@ fn check_albums(report: &mut Report, library: &Library) {
             ),
         );
 
-        // Only albums with embedded artwork ever get a cache PNG; an art-less album is
-        // not a failure, it is just reported.
-        if album.has_artwork {
-            let cover = library.cover_path(key);
-            let bytes = std::fs::metadata(&cover).map(|m| m.len()).unwrap_or(0);
+        // Every distinct picture of the album's songs has a cache PNG; an art-less album
+        // is not a failure, it is just reported.
+        if album.has_artwork() {
+            let missing: Vec<String> = album
+                .covers
+                .iter()
+                .filter(|id| {
+                    std::fs::metadata(library.cover_path(**id)).map_or(0, |m| m.len()) == 0
+                })
+                .map(ToString::to_string)
+                .collect();
             report.check(
-                bytes > 0,
+                missing.is_empty(),
                 "album.artwork",
-                &format!("{label}: {bytes} bytes at {}", cover.display()),
+                &format!(
+                    "{label}: {} distinct cover(s){}, missing {missing:?}",
+                    album.covers.len(),
+                    if album.mosaic().len() > 1 {
+                        " (mosaic)"
+                    } else {
+                        ""
+                    }
+                ),
             );
         } else {
             println!("INFO album.artwork {label}: no embedded artwork, cache not expected");
         }
     }
+    check_cover_cache(report, library);
+}
+
+/// The cover cache holds one PNG per distinct picture: as many cache files as the library
+/// has covers, never one per song. Files a scan running beside this one wrote would count
+/// too, so this is only meaningful on a quiet data dir — which is how the self-test runs.
+fn check_cover_cache(report: &mut Report, library: &Library) {
+    let with_art = library.tracks().filter(|t| t.has_artwork()).count();
+    let covers = library.cover_ids();
+    let files = std::fs::read_dir(library.covers_dir()).map_or(0, |entries| {
+        entries
+            .filter_map(Result::ok)
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .and_then(phoebus_core::CoverId::from_file_name)
+                    .is_some()
+            })
+            .count()
+    });
+    report.check(
+        files == covers.len(),
+        "covers.cache",
+        &format!(
+            "{with_art} songs with art, {} distinct covers, {files} cache files in {}",
+            covers.len(),
+            library.covers_dir().display()
+        ),
+    );
+}
+
+/// The launch path, headless: save the scanned library as a snapshot (into a scratch dir,
+/// never the active `library.json`), load it back, and rescan seeded with it, as the app
+/// does at every launch. Each step must reproduce the library exactly; the timings are
+/// what a launch costs with a snapshot against the full scan it replaces.
+///
+/// The rescan refreshes covers in the active data dir, exactly like the scan above, and
+/// writes nowhere else.
+fn check_snapshot(report: &mut Report, library: &Library, dirs: &Dirs, full_scan: Duration) {
+    let dir = match scratch("snapshot") {
+        Ok(dir) => dir,
+        Err(e) => {
+            report.check(false, "snapshot.roundtrip", &e);
+            return;
+        }
+    };
+    let path = Dirs::at(&dir).library_path();
+    let saved = snapshot::save(&path, library);
+    let bytes = std::fs::metadata(&path).map_or(0, |m| m.len());
+
+    let started = Instant::now();
+    let loaded = snapshot::load(&path, library.root(), &dirs.covers_dir());
+    let load_time = started.elapsed();
+    let Some(loaded) = loaded else {
+        report.check(
+            false,
+            "snapshot.roundtrip",
+            &format!("{} did not load back (saved: {saved:?})", path.display()),
+        );
+        cleanup(&dir);
+        return;
+    };
+    let differ = library.changed_albums(&loaded).len();
+    report.check(
+        differ == 0 && loaded.track_count() == library.track_count(),
+        "snapshot.roundtrip",
+        &format!(
+            "{} tracks, {} KB, loaded in {} ms, {differ} albums differ",
+            loaded.track_count(),
+            bytes / 1024,
+            load_time.as_millis()
+        ),
+    );
+
+    let started = Instant::now();
+    let rescanned = scanner::rescan_with_covers_progress(
+        library.root(),
+        &dirs.covers_dir(),
+        loaded.tracks().cloned(),
+        |_| {},
+    );
+    let rescan_time = started.elapsed();
+    let differ = loaded.changed_albums(&rescanned).len();
+    report.check(
+        differ == 0,
+        "snapshot.rescan",
+        &format!(
+            "incremental rescan in {} ms (full scan {} ms), {differ} albums differ",
+            rescan_time.as_millis(),
+            full_scan.as_millis()
+        ),
+    );
+    cleanup(&dir);
 }
 
 /// A track counts as tagged when the scanner ended up with SOME non-empty title, artist

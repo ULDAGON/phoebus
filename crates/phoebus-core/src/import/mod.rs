@@ -941,7 +941,7 @@ pub(crate) mod tests {
         assert_eq!(library.track_count(), 1);
         let track = library.track(library.tracks_sorted()[0]).expect("track");
         assert_eq!(track.album, "Resonance (Single)");
-        assert!(track.has_artwork);
+        assert!(track.has_artwork());
     }
 
     #[test]

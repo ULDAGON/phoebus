@@ -19,12 +19,18 @@
 //!   [`crate::controller::ENV_START_MUTED`]).
 //! * `PHOEBUS_SHOT_PLAYING=1` — auto-play the first album before shooting, so the frame
 //!   shows a populated player bar.
+//!
+//! And two steer the tour, so it can photograph a particular part of a real library:
+//! * `PHOEBUS_SHOT_ALBUM=<title>` — the album the `album` and `playing` steps open
+//!   ([`ENV_SHOT_ALBUM`]), e.g. a compilation whose songs carry their own covers.
+//! * `PHOEBUS_SHOT_QUERY=<text>` — what the `search` step types ([`ENV_SHOT_QUERY`]).
 
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use phoebus_core::{AlbumKey, Library};
 
 /// Steps that had to be shot before they settled. Written by [`Tour::should_request`],
 /// read by `main` once the window is gone — the app itself is owned by `eframe` by then,
@@ -132,6 +138,44 @@ impl Shot {
 
 /// The query the Search step types into the sidebar.
 pub const TOUR_QUERY: &str = "let";
+/// Environment variable naming the album the `album` and `playing` steps open, by title
+/// (case-insensitive; an exact title wins over a partial one). Unset, empty or unmatched:
+/// the first album, as always.
+pub const ENV_SHOT_ALBUM: &str = "PHOEBUS_SHOT_ALBUM";
+/// Environment variable replacing [`TOUR_QUERY`] for the `search` step.
+pub const ENV_SHOT_QUERY: &str = "PHOEBUS_SHOT_QUERY";
+
+/// What the `search` step types: [`ENV_SHOT_QUERY`], or [`TOUR_QUERY`].
+pub fn tour_query() -> String {
+    std::env::var(ENV_SHOT_QUERY)
+        .ok()
+        .filter(|q| !q.trim().is_empty())
+        .unwrap_or_else(|| TOUR_QUERY.to_string())
+}
+
+/// The album the `album` and `playing` steps open: the one [`ENV_SHOT_ALBUM`] names, or
+/// the first.
+pub fn tour_album(library: &Library) -> Option<AlbumKey> {
+    let wanted = std::env::var(ENV_SHOT_ALBUM).unwrap_or_default();
+    find_album(library, &wanted).or_else(|| library.albums().first().cloned())
+}
+
+/// The album titled `title` (case-insensitive), else the first whose title contains it.
+fn find_album(library: &Library, title: &str) -> Option<AlbumKey> {
+    let needle = title.trim().to_lowercase();
+    if needle.is_empty() {
+        return None;
+    }
+    let keys = library.albums();
+    let found = keys
+        .iter()
+        .find(|k| k.album == needle)
+        .or_else(|| keys.iter().find(|k| k.album.contains(&needle)));
+    if found.is_none() {
+        log::warn!("shot: no album titled {title:?}; using the first");
+    }
+    found.cloned()
+}
 /// Name of the demo playlist the tour invents when the library has none. It exists in
 /// memory only and is never written to `playlists.json`.
 pub const DEMO_PLAYLIST: &str = "LATE NIGHT";
@@ -172,7 +216,7 @@ pub enum Step {
     Recently,
     /// `albums.png`
     Albums,
-    /// `album.png` — the first album alphabetically.
+    /// `album.png` — the first album alphabetically, or [`ENV_SHOT_ALBUM`]'s.
     Album,
     /// `artists.png`
     Artists,
@@ -192,7 +236,7 @@ pub enum Step {
     /// (one per status) and the row editor open. Nothing is imported: the rows are built
     /// from the library itself.
     SettingsImport,
-    /// `playing.png` — loaded, paused, queue drawer open.
+    /// `playing.png` — loaded, paused, queue drawer open; the album of `album.png`.
     Playing,
 }
 
@@ -373,6 +417,27 @@ mod tests {
         assert!(!tour.should_request(false), "step is not ready");
         assert!(tour.should_request(true));
         assert!(!tour.should_request(true), "requested exactly once");
+    }
+
+    #[test]
+    fn the_tour_album_is_found_by_title() {
+        let lib = Library::build(
+            "/lib",
+            vec![
+                phoebus_core::Track::new("Ann/Alpha/01 a.m4a"),
+                phoebus_core::Track::new("Various/Mixed Bag/01 b.m4a"),
+                phoebus_core::Track::new("Various/Mixed/01 c.m4a"),
+            ],
+        );
+        let title = |key: Option<AlbumKey>| key.map(|k| k.album);
+        assert_eq!(
+            title(find_album(&lib, "MIXED")).as_deref(),
+            Some("mixed"),
+            "exact first"
+        );
+        assert_eq!(title(find_album(&lib, "bag")).as_deref(), Some("mixed bag"));
+        assert_eq!(find_album(&lib, "nope"), None);
+        assert_eq!(find_album(&lib, "  "), None);
     }
 
     #[test]

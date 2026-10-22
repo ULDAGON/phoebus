@@ -376,8 +376,8 @@ fn row_with(ui: &mut Ui, cx: &mut Ctx, id: TrackId, selected: bool, sense: Sense
     );
     let lib = cx.lib;
     let track = lib.track(id);
-    let key = track.map(|t| &t.album_key);
-    artwork::paint_cover(ui, cx.art, key, art_rect);
+    // The song's own picture, not its album's: on a compilation they differ.
+    artwork::paint_cover(ui, cx.art, track.and_then(|t| t.cover), art_rect);
 
     let text_x = title_x(rect);
     // UI-SPEC v1.2: the divider starts at the title, not at the state column.

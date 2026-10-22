@@ -56,7 +56,19 @@ fallbacks — an untagged `Artist/Album/01 Title.mp3` still lands in the right p
 Point it anywhere in **Settings** (sidebar, bottom) — including straight at
 `~/Music/Music/Media.localized/Music`. Phoebus only *reads* the library root — the one exception
 is [importing](#importing), which you start yourself. App data (state, playlists, cover
-cache) lives in `~/.phoebus/.phoebus/`, never in your music.
+cache, library snapshot) lives in `~/.phoebus/.phoebus/`, never in your music.
+
+Launch is instant after the first scan: each scan saves the library to `library.json` in the
+app-data dir, and the next launch shows it at once while a background scan reads only the
+files whose size or modification time changed. **RESCAN** in Settings reads every file again.
+
+Covers come from the art embedded in each song, so every song shows its own — in song lists,
+Up Next, the player bar and Now Playing. An album whose songs carry different art, such as a
+compilation, gets a four-tile mosaic of its first four covers on its card and page.
+`cache/covers/` keeps one PNG per distinct picture, named by a hash of its bytes: twenty
+songs with the same art share one file. Each scan writes the missing ones and deletes the
+ones no song uses any more. A scan that finds no music (an unmounted drive, for example)
+leaves the cache as it is. Art other than PNG or JPEG is not shown.
 
 ## Importing
 
@@ -143,13 +155,14 @@ lives in `assets/icon/` as SVG; `scripts/make-icons.sh` regenerates every raster
 - **Queue semantics** match Apple Music: playing a song makes its surrounding list the
   context; hand-queued songs always jump the line and survive context switches.
 - **Media keys & Now Playing**: hardware play/pause/next/prev, with title, artist and
-  cover art in macOS Control Center (MPRIS on Linux).
+  the song's cover art in macOS Control Center (MPRIS on Linux).
 - **Import** (in Settings): drop songs or whole album folders anywhere on the window, and
-  Settings opens at its IMPORT section, which lists each one as it is processed — cover, title, artist, album, and `QUEUED` /
-  `IMPORTING` / `IMPORTED` / `ALREADY IN LIBRARY` / why it failed — and `✎` on an imported
-  row edits title, artist, album, album artist, genre, year, track number and the cover
-  (drop a PNG or JPEG while the editor is open). The library rescans by itself when a batch
-  is done. See [Importing](#importing).
+  Settings opens at its IMPORT section, which lists each one as it is processed — cover,
+  title, artist, album, and `QUEUED` / `IMPORTING` / `IMPORTED` / `ALREADY IN LIBRARY` /
+  why it failed — and `✎` on an imported row edits title, artist, album, album artist,
+  genre, year, track number and the cover (drop a PNG or JPEG while the editor is open).
+  The library rescans by itself when a batch is done — in the background, like the launch
+  rescan, reading only new and changed files. See [Importing](#importing).
 - **Settings**: pick the library root (`~` expanded, applied with a rescan), import new
   music, and the look — dark or light, six accent presets or any colour you like. Applied
   live, saved on the spot.
@@ -166,19 +179,24 @@ closes the queue drawer / the import editor / leaves search. (`Ctrl` on Linux.)
 | variable | effect |
 |----------|--------|
 | `PHOEBUS_LIBRARY` | library root for this run; outranks the Settings value (which is then disabled) |
-| `PHOEBUS_DATA` | app-data dir; default `~/.phoebus/.phoebus` |
+| `PHOEBUS_DATA` | app-data dir (`state.json`, `playlists.json`, `favorites.json`, `library.json`, `cache/covers/`); default `~/.phoebus/.phoebus` |
 | `PHOEBUS_THEME` | `dark` / `light` / `light,#2EF0FF` — palette for one run, never saved |
 | `PHOEBUS_START_MUTED` | `1` starts at volume 0 without persisting it |
 | `PHOEBUS_SELFTEST_EXPECT` | `"albums,artists,tracks"` minimums for `--selftest` |
+| `PHOEBUS_SHOT_ALBUM` | album title the `--shot` tour opens for `album.png` and `playing.png` (default: the first album) |
+| `PHOEBUS_SHOT_QUERY` | what the `--shot` tour types for `search.png` (default: `let`) |
 
 ## Verification
 
 ```
-./target/release/phoebus --selftest    # headless: scan, tags, decode, seek, persistence
+./target/release/phoebus --selftest    # headless: scan, tags, snapshot, decode, seek, persistence
 ./target/release/phoebus --shot DIR    # screenshot tour of every view into DIR
 ```
 
-`--selftest` requires at least one album by default. Setting `PHOEBUS_DATA` and
+`--selftest` requires at least one album by default. It checks that every distinct cover of
+every album is cached, and that the cache holds one file per distinct picture
+(`covers.cache`). Its `snapshot.*` lines time the launch path: loading the snapshot and the
+incremental rescan, against the full scan. Setting `PHOEBUS_DATA` and
 `PHOEBUS_LIBRARY` to temporary directories together keeps a whole verification run off your
 real home.
 

@@ -38,8 +38,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use egui::{Align2, Rect, Sense, Stroke, StrokeKind, TextureHandle, Ui, Vec2};
+use phoebus_core::Library;
 use phoebus_core::import::{self, Dropped, Edit, Failure, Fields, Kind, Mode, Outcome, Placed};
-use phoebus_core::{AlbumKey, Library};
 
 use crate::artwork::{self, Artwork};
 use crate::importer::{CoverId, Job, Reply, RowId, SideJob, Worker};
@@ -98,8 +98,8 @@ enum Thumb {
     None,
     /// An uploaded thumbnail, shared by every row with the same artwork.
     Image(TextureHandle),
-    /// A library album's cover from the shared cache (the screenshot tour's sample rows).
-    Album(AlbumKey),
+    /// A library song's cover from the shared cache (the screenshot tour's sample rows).
+    Cover(Option<phoebus_core::CoverId>),
 }
 
 /// One dropped file.
@@ -722,7 +722,7 @@ impl State {
                 }),
                 status,
                 placed: None,
-                thumb: Thumb::Album(track.album_key.clone()),
+                thumb: Thumb::Cover(track.cover),
                 outside: false,
                 saving: None,
                 note,
@@ -1302,7 +1302,7 @@ fn paint_thumb(ui: &Ui, art: &mut Artwork, thumb: &Thumb, rect: Rect) {
                 egui::Color32::WHITE,
             );
         }
-        Thumb::Album(key) => artwork::paint_cover(ui, art, Some(key), rect),
+        Thumb::Cover(cover) => artwork::paint_cover(ui, art, *cover, rect),
         Thumb::None => artwork::paint_cover(ui, art, None, rect),
     }
 }

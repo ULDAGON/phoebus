@@ -21,15 +21,19 @@ fn main() {
 
     for key in lib.albums() {
         let album = lib.album(key).expect("album for listed key");
-        let cover = lib.cover_path(key);
+        let cached = album
+            .covers
+            .iter()
+            .filter(|id| lib.cover_path(**id).exists())
+            .count();
         println!(
-            "ALBUM {} — {} ({}) tracks={} art={} cover_cached={}",
+            "ALBUM {} — {} ({}) tracks={} covers={} cached={}",
             album.artist,
             album.title,
             album.year.map_or("?".into(), |y| y.to_string()),
             album.track_count(),
-            album.has_artwork,
-            cover.exists()
+            album.covers.len(),
+            cached
         );
         for (i, id) in lib.album_tracks(key).iter().take(3).enumerate() {
             let t = lib.track(*id).expect("track for listed id");
