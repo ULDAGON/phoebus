@@ -120,6 +120,10 @@ fi
 
 # LSMinimumSystemVersion 11.0: the Big Sur icon grid the `.icns` artwork is drawn on, and
 # the oldest macOS the aarch64/x86_64 Rust targets still claim to support.
+#
+# NSAppleEventsUsageDescription: the Import view hands songs to the Music app over Apple
+# events when the library is an Apple Music media folder. macOS asks once ("Phoebus wants
+# to control Music") and shows this string as the reason.
 cat >"$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -152,6 +156,8 @@ $icon_name_key
 	<true/>
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Phoebus adds the songs you import to the Music app and saves your edits there, so both libraries stay in step.</string>
 </dict>
 </plist>
 PLIST
