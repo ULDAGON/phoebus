@@ -167,6 +167,8 @@ pub fn rescan_cancellable<F: FnMut(ScanProgress)>(
     let mut tracks: Vec<Track> = Vec::new();
     let mut files_seen = 0usize;
     let mut reused = 0usize;
+    // The walk could not even open the root: a missing, unmounted or denied library.
+    let mut root_unreadable = false;
 
     let walker = WalkDir::new(root)
         .max_depth(MAX_DEPTH)
@@ -188,6 +190,7 @@ pub fn rescan_cancellable<F: FnMut(ScanProgress)>(
             let entry = match entry {
                 Ok(e) => e,
                 Err(e) => {
+                    root_unreadable |= e.depth() == 0;
                     log::warn!("scan: skipping unreadable entry: {e}");
                     continue;
                 }
@@ -229,8 +232,16 @@ pub fn rescan_cancellable<F: FnMut(ScanProgress)>(
         library
     });
     // A cancelled scan's library is incomplete: pruning by it would delete covers that the
-    // library the app keeps (or the new root's) still uses.
-    if !cancelled() {
+    // library the app keeps (or the new root's) still uses. So is the library of a root
+    // that could not be read or held nothing — an unmounted drive, an offline NAS, a
+    // denied folder: pruning by it would empty the whole cache, and the next scan of the
+    // root, back again, would have to extract every cover anew.
+    if root_unreadable || library.is_empty() {
+        log::info!(
+            "scan: {} gave no tracks; the cover cache is left as it is",
+            root.display()
+        );
+    } else if !cancelled() {
         prune_covers(covers_dir, &library.cover_ids(), started);
     }
 
@@ -1129,6 +1140,40 @@ mod tests {
         );
         assert!(!fresh.exists(), "older than the scan and unused");
         assert!(lib.cover_path(cover).exists(), "a used cover always stays");
+    }
+
+    /// An unmounted drive scans as an unreadable root, an emptied mount point as a root
+    /// without music. Neither may cost the cache a single cover.
+    #[test]
+    fn a_scan_that_finds_nothing_leaves_the_cache_alone() {
+        let music = tempfile::tempdir().expect("tempdir");
+        let covers = tempfile::tempdir().expect("tempdir");
+        let root = music.path().join("Volume");
+        write_wav_with_cover(&root.join("HOME/Odyssey/01 Intro.wav"), 200, 40);
+        let lib = scan_with_covers(&root, covers.path());
+        let cover = only_cover(&lib);
+        for name in cache_files(covers.path()) {
+            set_mtime(
+                &covers.path().join(name),
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000),
+            );
+        }
+
+        // The volume is gone: the root itself cannot be read.
+        fs::rename(&root, music.path().join("Elsewhere")).expect("unmount");
+        assert!(scan_with_covers(&root, covers.path()).is_empty());
+        assert!(
+            lib.cover_path(cover).exists(),
+            "an unreadable root prunes nothing"
+        );
+
+        // The mount point is back, but empty.
+        fs::create_dir(&root).expect("empty mount point");
+        assert!(scan_with_covers(&root, covers.path()).is_empty());
+        assert!(
+            lib.cover_path(cover).exists(),
+            "an empty library prunes nothing"
+        );
     }
 
     /// A rescan reuses tracks without opening their files, so their pictures are not in
