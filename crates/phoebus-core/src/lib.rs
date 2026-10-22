@@ -51,7 +51,8 @@ pub mod state;
 pub use color::{format_hex_color, parse_hex_color};
 pub use favorites::Favorites;
 pub use model::{
-    Album, AlbumKey, Artist, Library, Track, TrackId, UNKNOWN_ALBUM, UNKNOWN_ARTIST, UNKNOWN_TITLE,
+    Album, AlbumKey, Artist, CoverId, Library, MOSAIC_TILES, Track, TrackId, UNKNOWN_ALBUM,
+    UNKNOWN_ARTIST, UNKNOWN_TITLE,
 };
 pub use paths::{
     APP_DIR_NAME, DATA_ENV, Dirs, LIBRARY_ENV, data_dir, default_library_root, expand_tilde,

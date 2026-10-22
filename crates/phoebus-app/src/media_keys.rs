@@ -369,17 +369,22 @@ fn seek_target(pos: Duration, dir: SeekDirection, by: Duration) -> Duration {
     }
 }
 
-/// `file://` URL of a track's cached cover, or `None` when there is not a readable one.
+/// `file://` URL of a track's own cached cover, or `None` when there is not a sound one.
 ///
 /// `None` is the safe answer, not merely the tidy one: a `cover_url` the platform cannot
 /// load takes the whole process down (module header, API-FACTS §4). The cover cache is
 /// written by the scanner, so "missing" is the ordinary state during a first scan.
 fn cover_url(library: &Library, track: &Track, verbose: bool) -> Option<String> {
-    let path = library.cover_path(&track.album_key);
-    if !path.exists() {
+    let Some(cover) = track.cover else {
+        note(verbose, format_args!("no embedded cover, omitted"));
+        return None;
+    };
+    let path = library.cover_path(cover);
+    // Not just "exists": an empty or damaged file is as fatal to NSImage as none.
+    if !phoebus_core::scanner::cover_file_is_sound(&path) {
         note(
             verbose,
-            format_args!("cover missing, omitted: {}", path.display()),
+            format_args!("cover missing or not a PNG, omitted: {}", path.display()),
         );
         return None;
     }
@@ -672,5 +677,30 @@ mod tests {
         let missing = PathBuf::from("/definitely/not/here/0000000000000000.png");
         assert!(!missing.exists());
         assert!(file_url(&missing).is_some(), "the URL itself is buildable");
+    }
+
+    /// An empty or damaged cache file must not reach NSImage either: only a file that
+    /// starts like a PNG gets a URL.
+    #[test]
+    fn an_empty_or_damaged_cover_is_omitted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut track = Track::new("HOME/Odyssey/01 Intro.m4a");
+        let cover = phoebus_core::CoverId(0xc0);
+        track.cover = Some(cover);
+        let library = Library::build_with_covers("/music", dir.path(), vec![track.clone()]);
+        let path = library.cover_path(cover);
+
+        assert_eq!(cover_url(&library, &track, false), None, "missing");
+        std::fs::write(&path, b"").expect("write");
+        assert_eq!(cover_url(&library, &track, false), None, "empty");
+        std::fs::write(&path, b"<html>not a png</html>").expect("write");
+        assert_eq!(cover_url(&library, &track, false), None, "not a PNG");
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([0, 0, 255, 255]))
+            .save(&path)
+            .expect("write cover");
+        assert!(
+            cover_url(&library, &track, false).is_some(),
+            "a sound cover"
+        );
     }
 }

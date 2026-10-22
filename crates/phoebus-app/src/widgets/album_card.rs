@@ -169,11 +169,11 @@ fn card(ui: &mut Ui, cx: &mut Ctx, key: &AlbumKey, width: f32, height: f32) {
     let heart = (hovering || hearted)
         .then(|| ui.interact(heart_rect, response.id.with("heart"), Sense::click()));
 
-    artwork::paint_cover(ui, cx.art, Some(key), cover_rect);
-
     // Copy the shared library reference out of `cx` so these borrows outlive `&mut cx`.
     let lib = cx.lib;
     let album = lib.album(key);
+    // One cover, or a mosaic when the album's songs carry different ones.
+    artwork::paint_mosaic(ui, cx.art, album.map_or(&[], |a| a.mosaic()), cover_rect);
     let title = album.map_or(key.album.as_str(), |a| a.title.as_str());
     let artist = album.map_or(key.artist.as_str(), |a| a.artist.as_str());
     let tracks: &[phoebus_core::TrackId] = album.map_or(&[], |a| a.track_ids.as_slice());

@@ -42,7 +42,11 @@ use crate::paths;
 
 /// Format version of `library.json`. Bump it whenever the stored form of a [`Track`]
 /// changes; every older (and newer) snapshot is then ignored and rebuilt by one full scan.
-pub const VERSION: u32 = 1;
+///
+/// 2: a track stores its own cover ([`Track::cover`], a content hash) instead of a
+/// `has_artwork` flag. A version-1 file cannot say which picture a track carries, and
+/// reusing its tracks would leave every song without a cover until its file changed.
+pub const VERSION: u32 = 2;
 
 /// The longest track a snapshot may hold: a year. No audio file is longer; a snapshot that
 /// claims one is damaged or hostile, and is passed over like any other corrupt file (a
@@ -249,7 +253,7 @@ pub fn load(path: &Path, root: &Path, covers_dir: &Path) -> Option<Library> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::TrackId;
+    use crate::model::{CoverId, TrackId};
     use std::time::{Duration, SystemTime};
 
     fn track(rel: &str, secs: u64, size: u64) -> Track {
@@ -258,7 +262,9 @@ mod tests {
         t.added_at = SystemTime::UNIX_EPOCH + Duration::new(1_700_000_000 + secs, 123_456_789);
         t.size = size;
         t.year = Some(2014);
-        t.has_artwork = true;
+        // Every track its own picture, as on a compilation; the top bit set, so the id
+        // only round-trips if it is stored as the full u64 and not as a float.
+        t.cover = Some(CoverId(0x8000_0000_0000_0000 | size));
         t
     }
 
@@ -299,6 +305,34 @@ mod tests {
         assert_eq!(loaded.covers_dir(), dirs.covers_dir());
         let id = TrackId::for_rel_path("HOME/Odyssey/02 Resonance.m4a");
         assert_eq!(loaded.track(id), saved.track(id));
+        for track in saved.tracks() {
+            assert_eq!(
+                loaded.track(track.id).and_then(|t| t.cover),
+                track.cover,
+                "{} keeps its own cover",
+                track.rel_path
+            );
+        }
+        assert_eq!(loaded.cover_ids(), saved.cover_ids());
+    }
+
+    /// A snapshot written before tracks knew their covers is ignored whole, so the first
+    /// launch after the upgrade reads every file once and finds every song's picture.
+    #[test]
+    fn a_snapshot_from_before_per_song_covers_is_ignored() {
+        let data = tempfile::tempdir().expect("tempdir");
+        let dirs = paths::Dirs::at(data.path());
+        let v1 = r#"{"version":1,"root":"/music","tracks":[{"rel_path":"HOME/Odyssey/01 Intro.m4a","source_path":null,"title":"Intro","artist":"HOME","album_artist":"HOME","album":"Odyssey","track_no":1,"disc_no":null,"year":null,"genre":null,"duration":{"secs":61,"nanos":0},"has_artwork":true,"added_at":[1700000000,0],"size":1000}]}"#;
+        std::fs::write(dirs.library_path(), v1).expect("write");
+        const { assert!(VERSION > 1) };
+        assert!(
+            load(
+                &dirs.library_path(),
+                Path::new("/music"),
+                &dirs.covers_dir()
+            )
+            .is_none()
+        );
     }
 
     #[test]

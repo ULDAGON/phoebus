@@ -297,7 +297,9 @@ fn lcd(ui: &mut egui::Ui, cx: &mut Ctx, state: &BarState, rect: Rect, bar: Rect)
         Vec2::splat(theme::LCD_ART),
     );
     let album_key = cx.lib.track(id).map(|t| t.album_key.clone());
-    artwork::paint_cover(ui, cx.art, album_key.as_ref(), art_rect);
+    // The playing song's own picture: on a compilation it is not the album's first.
+    let cover = cx.lib.track(id).and_then(|t| t.cover);
+    artwork::paint_cover(ui, cx.art, cover, art_rect);
 
     let text_left = art_rect.right() + theme::LCD_PAD;
     let text_right = rect.right() - theme::LCD_PAD;

@@ -62,6 +62,14 @@ Launch is instant after the first scan: each scan saves the library to `library.
 app-data dir, and the next launch shows it at once while a background scan reads only the
 files whose size or modification time changed. **RESCAN** in Settings reads every file again.
 
+Covers come from the art embedded in each song, so every song shows its own — in song lists,
+Up Next, the player bar and Now Playing. An album whose songs carry different art, such as a
+compilation, gets a four-tile mosaic of its first four covers on its card and page.
+`cache/covers/` keeps one PNG per distinct picture, named by a hash of its bytes: twenty
+songs with the same art share one file. Each scan writes the missing ones and deletes the
+ones no song uses any more. A scan that finds no music (an unmounted drive, for example)
+leaves the cache as it is. Art other than PNG or JPEG is not shown.
+
 ## Omarchy
 
 On [Omarchy](https://omarchy.org), Phoebus can wear the active system theme — surfaces,
@@ -109,7 +117,7 @@ lives in `assets/icon/` as SVG; `scripts/make-icons.sh` regenerates every raster
 - **Queue semantics** match Apple Music: playing a song makes its surrounding list the
   context; hand-queued songs always jump the line and survive context switches.
 - **Media keys & Now Playing**: hardware play/pause/next/prev, with title, artist and
-  cover art in macOS Control Center (MPRIS on Linux).
+  the song's cover art in macOS Control Center (MPRIS on Linux).
 - **Settings**: pick the library root (`~` expanded, applied with a rescan) and the look —
   dark or light, six accent presets or any colour you like. Applied live, saved on the spot.
 - **Resizable panels**: every vertical divider drags — the sidebar, the Up Next drawer and
@@ -129,6 +137,8 @@ closes the queue drawer / leaves search. (`Ctrl` on Linux.)
 | `PHOEBUS_THEME` | `dark` / `light` / `light,#2EF0FF` — palette for one run, never saved |
 | `PHOEBUS_START_MUTED` | `1` starts at volume 0 without persisting it |
 | `PHOEBUS_SELFTEST_EXPECT` | `"albums,artists,tracks"` minimums for `--selftest` |
+| `PHOEBUS_SHOT_ALBUM` | album title the `--shot` tour opens for `album.png` and `playing.png` (default: the first album) |
+| `PHOEBUS_SHOT_QUERY` | what the `--shot` tour types for `search.png` (default: `let`) |
 
 ## Verification
 
@@ -137,8 +147,10 @@ closes the queue drawer / leaves search. (`Ctrl` on Linux.)
 ./target/release/phoebus --shot DIR    # screenshot tour of every view into DIR
 ```
 
-`--selftest` requires at least one album by default. Its `snapshot.*` lines time the launch
-path: loading the snapshot and the incremental rescan, against the full scan. Setting `PHOEBUS_DATA` and
+`--selftest` requires at least one album by default. It checks that every distinct cover of
+every album is cached, and that the cache holds one file per distinct picture
+(`covers.cache`). Its `snapshot.*` lines time the launch path: loading the snapshot and the
+incremental rescan, against the full scan. Setting `PHOEBUS_DATA` and
 `PHOEBUS_LIBRARY` to temporary directories together keeps a whole verification run off your
 real home.
 

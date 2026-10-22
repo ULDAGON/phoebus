@@ -129,7 +129,8 @@ impl Dirs {
         self.data.join("library.json")
     }
 
-    /// `<data>/cache/covers` — one PNG per album, named by [`fnv1a_64`] of the album key.
+    /// `<data>/cache/covers` — one PNG per distinct embedded picture, named by its
+    /// [`CoverId`](crate::model::CoverId) (`<16 hex digits>.png`).
     pub fn covers_dir(&self) -> PathBuf {
         self.data.join("cache").join("covers")
     }

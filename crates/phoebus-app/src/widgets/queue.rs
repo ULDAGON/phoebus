@@ -94,7 +94,7 @@ fn row(ui: &mut Ui, cx: &mut Ctx, index: usize, item: UpNext) {
     );
     let lib = cx.lib;
     let track = lib.track(item.id);
-    artwork::paint_cover(ui, cx.art, track.map(|t| &t.album_key), art_rect);
+    artwork::paint_cover(ui, cx.art, track.and_then(|t| t.cover), art_rect);
 
     let mut text_x = art_rect.right() + theme::CARD_TEXT_GAP;
     if item.manual {

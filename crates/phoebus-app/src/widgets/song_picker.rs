@@ -301,7 +301,7 @@ fn row(ui: &mut Ui, cx: &mut Ctx, id: TrackId, member: bool) -> bool {
     );
     let lib = cx.lib;
     let track = lib.track(id);
-    artwork::paint_cover(ui, cx.art, track.map(|t| &t.album_key), art_rect);
+    artwork::paint_cover(ui, cx.art, track.and_then(|t| t.cover), art_rect);
 
     let text_x = art_rect.right() + theme::LCD_PAD + 2.0;
     // UI-SPEC v1.2 §Track rows: the divider starts at the title, not at the row's edge.

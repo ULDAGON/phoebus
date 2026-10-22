@@ -1,11 +1,11 @@
-//! The library data model: [`TrackId`], [`Track`], [`AlbumKey`], [`Album`], [`Artist`],
-//! [`Library`].
+//! The library data model: [`TrackId`], [`CoverId`], [`Track`], [`AlbumKey`], [`Album`],
+//! [`Artist`], [`Library`].
 //!
 //! Everything the UI needs per frame is pre-computed at build time: sorted `Vec`s of keys,
 //! `HashMap`/`BTreeMap` lookups, and durations. Nothing here allocates when read, so an
 //! egui app that redraws every frame can call these getters freely.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -67,20 +67,6 @@ impl AlbumKey {
             album: album.trim().to_lowercase(),
         }
     }
-
-    /// FNV-1a-64 of the key — the name of this album's cached cover PNG.
-    pub fn hash64(&self) -> u64 {
-        let mut buf = String::with_capacity(self.artist.len() + self.album.len() + 1);
-        buf.push_str(&self.artist);
-        buf.push('\u{1f}');
-        buf.push_str(&self.album);
-        fnv1a_64(buf.as_bytes())
-    }
-
-    /// File name of this album's cached cover, e.g. `176f932674e9821f.png`.
-    pub fn cover_file_name(&self) -> String {
-        format!("{:016x}.png", self.hash64())
-    }
 }
 
 impl std::fmt::Display for AlbumKey {
@@ -88,6 +74,54 @@ impl std::fmt::Display for AlbumKey {
         write!(f, "{} — {}", self.artist, self.album)
     }
 }
+
+/// Identity of a cover image: FNV-1a-64 of the bytes of a track's first embedded picture.
+///
+/// Content, not album: two songs that carry the same picture share one id — and so one
+/// cached PNG and one GPU texture — whatever album they are on, and a compilation whose
+/// songs each carry their own art gets one id per picture. Because the id *is* the
+/// content, a cache file named after it never goes stale: new art is a new id, and a file
+/// that exists is the right one.
+///
+/// The hash is of the bytes as embedded, so the same image encoded twice (two rips, two
+/// JPEG qualities) counts as two covers. Telling those apart would mean decoding every
+/// picture of every file on every scan; the bytes are already in memory when the tag is
+/// read.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
+pub struct CoverId(pub u64);
+
+impl CoverId {
+    /// The id of an embedded picture, from its raw bytes.
+    pub fn of_picture(bytes: &[u8]) -> CoverId {
+        CoverId(fnv1a_64(bytes))
+    }
+
+    /// Name of this cover's cached PNG, e.g. `176f932674e9821f.png`.
+    pub fn file_name(self) -> String {
+        format!("{self}.png")
+    }
+
+    /// The id a cache file name stands for, or `None` for any name the cache did not
+    /// write: exactly sixteen lowercase hex digits and `.png`. This is the one test that
+    /// lets the scanner delete from the covers directory, so it is strict.
+    pub fn from_file_name(name: &str) -> Option<CoverId> {
+        let hex = name.strip_suffix(".png")?;
+        if hex.len() != 16 || !hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            return None;
+        }
+        u64::from_str_radix(hex, 16).ok().map(CoverId)
+    }
+}
+
+impl std::fmt::Display for CoverId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:016x}", self.0)
+    }
+}
+
+/// Most covers a mosaic shows: four, in a 2 × 2 grid — the album card and header of an
+/// album whose songs carry different art, and the playlist header.
+pub const MOSAIC_TILES: usize = 4;
 
 /// One audio file plus its (tag- or path-derived) metadata.
 ///
@@ -131,8 +165,9 @@ pub struct Track {
     pub genre: Option<String>,
     /// Decoded duration (from the container properties, not an estimate).
     pub duration: Duration,
-    /// Whether the file carries at least one embedded picture.
-    pub has_artwork: bool,
+    /// The file's first embedded picture (whatever its `PictureType`), by content; `None`
+    /// when it carries none. Painted wherever this song shows a cover.
+    pub cover: Option<CoverId>,
     /// File mtime — drives the Recently Added view, and is half of what tells an
     /// incremental rescan that the file has not changed since it was last read.
     #[serde(with = "mtime")]
@@ -180,7 +215,7 @@ impl Track {
             year: None,
             genre: None,
             duration: Duration::ZERO,
-            has_artwork: false,
+            cover: None,
             added_at: SystemTime::UNIX_EPOCH,
             size: 0,
         };
@@ -193,6 +228,11 @@ impl Track {
     pub fn refresh_key(&mut self) {
         self.album_key = AlbumKey::new(&self.album_artist, &self.album);
         self.id = TrackId::for_rel_path(&self.rel_path);
+    }
+
+    /// Whether the file carries at least one embedded picture.
+    pub fn has_artwork(&self) -> bool {
+        self.cover.is_some()
     }
 
     /// Absolute path of the file, for the audio engine.
@@ -224,15 +264,22 @@ pub struct Album {
     pub added_at: SystemTime,
     /// Sum of the tracks' durations (for `YEAR · N SONGS · MM MIN`).
     pub duration: Duration,
-    /// True if any track carries embedded artwork (i.e. a cover PNG should exist).
-    pub has_artwork: bool,
+    /// Every distinct cover of the album's tracks, in track order. Tracks without art add
+    /// nothing, so an album without any art has none, and one whose songs all share one
+    /// picture has exactly one.
+    pub covers: Vec<CoverId>,
 }
 
 impl Album {
-    /// Path of this album's cached cover PNG inside `covers_dir`
-    /// (`<library>/.phoebus/cache/covers`). The file may not exist — check before use.
-    pub fn cover_path(&self, covers_dir: &Path) -> PathBuf {
-        covers_dir.join(self.key.cover_file_name())
+    /// True if any track carries embedded artwork.
+    pub fn has_artwork(&self) -> bool {
+        !self.covers.is_empty()
+    }
+
+    /// What the album's card and header paint: its first [`MOSAIC_TILES`] distinct
+    /// covers. One cover is the ordinary album; more is a mosaic.
+    pub fn mosaic(&self) -> &[CoverId] {
+        &self.covers[..self.covers.len().min(MOSAIC_TILES)]
     }
 
     /// Number of tracks on the album.
@@ -328,13 +375,18 @@ impl Library {
                 track_ids: Vec::with_capacity(members.len()),
                 added_at: SystemTime::UNIX_EPOCH,
                 duration: Duration::ZERO,
-                has_artwork: false,
+                covers: Vec::new(),
             };
+            let mut seen: HashSet<CoverId> = HashSet::new();
             for &i in &members {
                 let t = &tracks[i];
                 album.track_ids.push(t.id);
                 album.duration = album.duration.saturating_add(t.duration);
-                album.has_artwork |= t.has_artwork;
+                if let Some(cover) = t.cover
+                    && seen.insert(cover)
+                {
+                    album.covers.push(cover);
+                }
                 if album.year.is_none() {
                     album.year = t.year;
                 }
@@ -439,9 +491,15 @@ impl Library {
         self.covers.clone()
     }
 
-    /// Cached cover PNG path for an album key (the file may not exist).
-    pub fn cover_path(&self, key: &AlbumKey) -> PathBuf {
-        self.covers.join(key.cover_file_name())
+    /// Cached PNG path of a cover (the file may not exist — it is written by the scan).
+    pub fn cover_path(&self, cover: CoverId) -> PathBuf {
+        self.covers.join(cover.file_name())
+    }
+
+    /// Every cover some track of the library carries, each once — the set the cover cache
+    /// has to hold, and everything else in it may go.
+    pub fn cover_ids(&self) -> HashSet<CoverId> {
+        self.tracks.values().filter_map(|t| t.cover).collect()
     }
 
     /// Look up a track. O(1).
@@ -550,6 +608,34 @@ impl Library {
     pub fn holds_exactly(&self, tracks: &[Track]) -> bool {
         self.tracks.len() == tracks.len()
             && tracks.iter().all(|t| self.tracks.get(&t.id) == Some(t))
+    }
+
+    /// Every cover of `self` that `newer` paints something else in the place of, as
+    /// `(old, new)`: a song whose art changed, and each tile of an album's mosaic whose
+    /// cover moved. What lets the UI keep painting the old picture until the new one has
+    /// loaded, instead of the placeholder. A cover that went away without a successor is
+    /// not in it.
+    pub fn replaced_covers(&self, newer: &Library) -> Vec<(CoverId, CoverId)> {
+        let mut pairs: HashSet<(CoverId, CoverId)> = HashSet::new();
+        for (id, track) in &newer.tracks {
+            if let Some(old) = self.tracks.get(id).and_then(|t| t.cover)
+                && let Some(new) = track.cover
+                && old != new
+            {
+                pairs.insert((old, new));
+            }
+        }
+        for (key, album) in &newer.albums {
+            let Some(before) = self.albums.get(key) else {
+                continue;
+            };
+            for (old, new) in before.mosaic().iter().zip(album.mosaic()) {
+                if old != new {
+                    pairs.insert((*old, *new));
+                }
+            }
+        }
+        pairs.into_iter().collect()
     }
 
     /// The albums whose tracks differ between `self` and `newer`.
@@ -756,27 +842,96 @@ mod tests {
     }
 
     #[test]
-    fn album_key_lowercases_and_names_its_cover() {
+    fn album_key_lowercases() {
         let k = AlbumKey::new(" HOME ", "Odyssey");
         assert_eq!(k.artist, "home");
         assert_eq!(k.album, "odyssey");
         assert_eq!(k, AlbumKey::new("home", "ODYSSEY"));
-        assert_eq!(k.hash64(), 0x176f_9326_74e9_821f);
-        assert_eq!(k.cover_file_name(), "176f932674e9821f.png");
-        let album = Album {
-            key: k.clone(),
-            title: "Odyssey".into(),
-            artist: "HOME".into(),
-            year: None,
-            track_ids: vec![],
-            added_at: SystemTime::UNIX_EPOCH,
-            duration: Duration::ZERO,
-            has_artwork: true,
-        };
+    }
+
+    /// A cover is named by its content, and only names of that exact shape are read back
+    /// as covers — the scanner deletes by this test, so anything looser could delete a
+    /// file the cache never wrote.
+    #[test]
+    fn a_cover_id_names_its_file_and_reads_back_only_its_own_names() {
+        let id = CoverId::of_picture(b"picture bytes");
+        assert_eq!(id, CoverId::of_picture(b"picture bytes"), "stable");
+        assert_ne!(id, CoverId::of_picture(b"other bytes"));
         assert_eq!(
-            album.cover_path(Path::new("/c")),
-            PathBuf::from("/c/176f932674e9821f.png")
+            CoverId(0x176f_9326_74e9_821f).file_name(),
+            "176f932674e9821f.png"
         );
+        assert_eq!(CoverId(0xab).file_name(), "00000000000000ab.png");
+        assert_eq!(CoverId::from_file_name(&id.file_name()), Some(id));
+        for foreign in [
+            "176f932674e9821f.jpg",
+            "176F932674E9821F.png",
+            "176f932674e9821.png",
+            "176f932674e9821f0.png",
+            "+76f932674e9821f.png",
+            "176f932674e9821f.png.tmp",
+            ".176f932674e9821.png",
+            "cover.png",
+            "notes.txt",
+            "",
+        ] {
+            assert_eq!(CoverId::from_file_name(foreign), None, "{foreign:?}");
+        }
+    }
+
+    fn with_cover(rel: &str, cover: Option<u64>) -> Track {
+        let mut track = t(rel, 10, 1);
+        track.cover = cover.map(CoverId);
+        track
+    }
+
+    /// An album lists each cover once, in track order (not file order), and skips the
+    /// tracks without art.
+    #[test]
+    fn an_album_lists_its_distinct_covers_in_track_order() {
+        let lib = Library::build(
+            "/lib",
+            vec![
+                with_cover("Various/Mixed/05 e.m4a", Some(3)),
+                with_cover("Various/Mixed/01 a.m4a", Some(1)),
+                with_cover("Various/Mixed/03 c.m4a", None),
+                with_cover("Various/Mixed/02 b.m4a", Some(2)),
+                with_cover("Various/Mixed/04 d.m4a", Some(1)),
+                with_cover("Various/Mixed/06 f.m4a", Some(4)),
+                with_cover("Various/Mixed/07 g.m4a", Some(5)),
+            ],
+        );
+        let album = lib
+            .album(&AlbumKey::new("Various", "Mixed"))
+            .expect("album");
+        assert_eq!(album.covers, [1, 2, 3, 4, 5].map(CoverId));
+        assert!(album.has_artwork());
+        assert_eq!(
+            album.mosaic(),
+            &[1, 2, 3, 4].map(CoverId),
+            "the mosaic is the first four distinct covers"
+        );
+        assert_eq!(lib.cover_ids().len(), 5);
+    }
+
+    /// One distinct cover is an ordinary album, however many songs carry it; none is the
+    /// placeholder.
+    #[test]
+    fn an_album_whose_songs_share_one_cover_has_one() {
+        let lib = Library::build(
+            "/lib",
+            vec![
+                with_cover("HOME/Odyssey/01 a.m4a", Some(7)),
+                with_cover("HOME/Odyssey/02 b.m4a", Some(7)),
+                with_cover("HOME/Odyssey/03 c.m4a", None),
+                with_cover("Bare/Plain/01 x.m4a", None),
+            ],
+        );
+        let odyssey = lib.album(&AlbumKey::new("HOME", "Odyssey")).expect("album");
+        assert_eq!(odyssey.mosaic(), &[CoverId(7)]);
+        let plain = lib.album(&AlbumKey::new("Bare", "Plain")).expect("album");
+        assert!(!plain.has_artwork());
+        assert!(plain.mosaic().is_empty());
     }
 
     #[test]
@@ -950,9 +1105,8 @@ mod tests {
         assert!(lib.track(TrackId(9)).is_none());
         assert!(Library::empty("/lib").is_empty());
         assert_eq!(
-            lib.cover_path(&AlbumKey::new("A", "B")),
-            PathBuf::from("/lib/.phoebus/cache/covers")
-                .join(AlbumKey::new("A", "B").cover_file_name())
+            lib.cover_path(CoverId(0xab)),
+            PathBuf::from("/lib/.phoebus/cache/covers/00000000000000ab.png")
         );
     }
 
@@ -960,7 +1114,6 @@ mod tests {
     /// app-data dir so nothing is ever written inside the music tree.
     #[test]
     fn a_library_carries_its_covers_dir() {
-        let key = AlbumKey::new("A", "B");
         let lib = Library::build_with_covers(
             "/music",
             "/data/cache/covers",
@@ -969,8 +1122,8 @@ mod tests {
         assert_eq!(lib.root(), Path::new("/music"));
         assert_eq!(lib.covers_dir(), PathBuf::from("/data/cache/covers"));
         assert_eq!(
-            lib.cover_path(&key),
-            PathBuf::from("/data/cache/covers").join(key.cover_file_name()),
+            lib.cover_path(CoverId(0xab)),
+            PathBuf::from("/data/cache/covers/00000000000000ab.png"),
             "cover_path follows the explicit dir, not the root"
         );
         assert_eq!(
@@ -1000,7 +1153,7 @@ mod tests {
         tr.added_at = SystemTime::UNIX_EPOCH + Duration::new(1_700_000_000, 987_654_321);
         tr.size = 8_123_456;
         tr.genre = Some("Synthwave".to_string());
-        tr.has_artwork = true;
+        tr.cover = Some(CoverId(0xfeed_beef_dead_cafe));
         tr.source_path = Some(PathBuf::from("/lib/real name/01 Intro.m4a"));
 
         let json = serde_json::to_string(&tr).expect("serialize");
@@ -1033,6 +1186,49 @@ mod tests {
         let json = serde_json::to_string(&tr).expect("a non-UTF-8 path must not fail the save");
         let back: Track = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.source_path, Some(real));
+    }
+
+    #[test]
+    fn replaced_covers_pair_each_old_cover_with_its_successor() {
+        let old = Library::build(
+            "/lib",
+            vec![
+                with_cover("Various/Mixed/01 a.m4a", Some(1)),
+                with_cover("Various/Mixed/02 b.m4a", Some(2)),
+                with_cover("Various/Mixed/03 c.m4a", Some(3)),
+            ],
+        );
+        assert!(old.replaced_covers(&old.clone()).is_empty());
+        let newer = Library::build(
+            "/lib",
+            vec![
+                with_cover("Various/Mixed/01 a.m4a", Some(1)),
+                with_cover("Various/Mixed/02 b.m4a", Some(9)), // re-tagged
+                with_cover("Various/Mixed/03 c.m4a", None),    // art removed
+            ],
+        );
+        let mut pairs = old.replaced_covers(&newer);
+        pairs.sort();
+        assert_eq!(
+            pairs,
+            vec![(CoverId(2), CoverId(9))],
+            "the song and its mosaic tile; a cover without a successor is not paired"
+        );
+    }
+
+    /// A scan that found the same songs with other art did find something new: the
+    /// snapshot has to be rewritten, or the next launch would show the old covers' ids.
+    #[test]
+    fn holds_exactly_tells_a_changed_cover_apart() {
+        let lib = Library::build("/lib", vec![with_cover("A/One/01 x.mp3", Some(1))]);
+        let same = vec![with_cover("A/One/01 x.mp3", Some(1))];
+        assert!(lib.holds_exactly(&same));
+        for other in [Some(2), None] {
+            assert!(
+                !lib.holds_exactly(&[with_cover("A/One/01 x.mp3", other)]),
+                "{other:?}"
+            );
+        }
     }
 
     /// Durations come from files and snapshots, so summing them must clamp, not panic.

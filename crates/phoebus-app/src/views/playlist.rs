@@ -1,4 +1,4 @@
-//! Playlist detail: a mosaic cover built from the playlist's own albums, an inline-
+//! Playlist detail: a mosaic cover built from the playlist's own songs' covers, an inline-
 //! renameable title, and a reorderable track list.
 //!
 //! The one subtlety here is **entry indices**. A playlist stores paths, and the same song
@@ -27,16 +27,13 @@
 
 use egui::{Key, PointerButton, Pos2, Rect, Sense, Ui, Vec2};
 use phoebus_core::playlists::move_target;
-use phoebus_core::{AlbumKey, Library, Playlist, TrackId};
+use phoebus_core::{CoverId, Library, MOSAIC_TILES, Playlist, TrackId};
 
-use crate::artwork::{self, Artwork};
+use crate::artwork;
 use crate::nav::{self, Action, Ctx};
 use crate::theme;
 use crate::views;
 use crate::widgets::{self, menus, song_picker, song_row};
-
-/// Longest mosaic: four distinct album covers in a 2 × 2 grid.
-const MOSAIC_TILES: usize = 4;
 
 /// Why `PLAY` / `SHUFFLE` are dead on an empty playlist.
 const EMPTY_TIP: &str = "NOTHING TO PLAY YET";
@@ -76,7 +73,7 @@ pub struct Entries {
     key: Option<(u64, u64, usize)>,
     rows: Vec<(usize, TrackId)>,
     total: std::time::Duration,
-    mosaic: Vec<AlbumKey>,
+    mosaic: Vec<CoverId>,
 }
 
 impl Entries {
@@ -103,8 +100,13 @@ impl Entries {
             };
             self.rows.push((index, id));
             self.total = self.total.saturating_add(track.duration);
-            if self.mosaic.len() < MOSAIC_TILES && !self.mosaic.contains(&track.album_key) {
-                self.mosaic.push(track.album_key.clone());
+            // The songs' own covers, as their rows show them — so a playlist drawn from
+            // one compilation is a mosaic of its songs, not that album's first picture.
+            if let Some(cover) = track.cover
+                && self.mosaic.len() < MOSAIC_TILES
+                && !self.mosaic.contains(&cover)
+            {
+                self.mosaic.push(cover);
             }
         }
         self.key = Some(key);
@@ -120,8 +122,8 @@ impl Entries {
         self.total
     }
 
-    /// Up to four distinct album covers, in playlist order.
-    fn mosaic(&self) -> &[AlbumKey] {
+    /// Up to four distinct song covers, in playlist order.
+    fn mosaic(&self) -> &[CoverId] {
         &self.mosaic
     }
 }
@@ -545,7 +547,7 @@ struct Head<'a> {
     name: &'a str,
     rows: &'a [(usize, TrackId)],
     total: std::time::Duration,
-    mosaic: &'a [AlbumKey],
+    mosaic: &'a [CoverId],
 }
 
 fn header(ui: &mut Ui, cx: &mut Ctx, rename: &mut Option<Rename>, head: Head<'_>) {
@@ -558,7 +560,7 @@ fn header(ui: &mut Ui, cx: &mut Ctx, rename: &mut Option<Rename>, head: Head<'_>
     } = head;
     ui.horizontal_top(|ui| {
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(theme::DETAIL_COVER), Sense::hover());
-        mosaic(ui, cx.art, keys, rect);
+        artwork::paint_mosaic(ui, cx.art, keys, rect);
         ui.add_space(theme::VIEW_PAD);
         ui.vertical(|ui| {
             title(ui, cx, rename, id, name);
@@ -650,47 +652,10 @@ fn title(ui: &mut Ui, cx: &mut Ctx, rename: &mut Option<Rename>, id: u64, name: 
     }
 }
 
-/// Paint the playlist cover: one cover, a 2 × 2 mosaic, or the `♪` placeholder.
-fn mosaic(ui: &Ui, art: &mut Artwork, keys: &[AlbumKey], rect: Rect) {
-    match keys.len() {
-        0 => artwork::paint_cover(ui, art, None, rect),
-        1 => artwork::paint_cover(ui, art, keys.first(), rect),
-        n => {
-            let half = rect.width() * 0.5;
-            for tile in 0..MOSAIC_TILES {
-                let origin = egui::pos2(
-                    rect.left() + (tile % 2) as f32 * half,
-                    rect.top() + (tile / 2) as f32 * half,
-                );
-                artwork::paint_cover(
-                    ui,
-                    art,
-                    keys.get(tile % n),
-                    Rect::from_min_size(origin, Vec2::splat(half)),
-                );
-            }
-            let painter = ui.painter_at(rect);
-            painter.line_segment(
-                [
-                    egui::pos2(rect.center().x, rect.top()),
-                    egui::pos2(rect.center().x, rect.bottom()),
-                ],
-                theme::hairline(),
-            );
-            painter.line_segment(
-                [
-                    egui::pos2(rect.left(), rect.center().y),
-                    egui::pos2(rect.right(), rect.center().y),
-                ],
-                theme::hairline(),
-            );
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artwork::Artwork;
     use phoebus_core::Track;
 
     /// Where the song list starts in the test window: the page's own margin, the header's
@@ -1060,8 +1025,10 @@ mod tests {
             Track::new("HOME/Odyssey/02 Resonance.m4a"),
             Track::new("Woodkid/S16/01 Goliath.m4a"),
         ];
-        for (i, t) in tracks.iter_mut().enumerate() {
+        // The two Odyssey songs share their album's picture; Goliath carries its own.
+        for ((i, t), cover) in tracks.iter_mut().enumerate().zip([1, 1, 2]) {
             t.duration = std::time::Duration::from_secs(60 * (i as u64 + 1));
+            t.cover = Some(CoverId(cover));
         }
         Library::build("/lib", tracks)
     }
@@ -1209,7 +1176,11 @@ mod tests {
             std::time::Duration::from_secs(60 + 120 + 180),
             "unresolved entries contribute nothing"
         );
-        assert_eq!(entries.mosaic().len(), 2, "distinct albums only");
+        assert_eq!(
+            entries.mosaic(),
+            &[CoverId(1), CoverId(2)],
+            "distinct covers only, in playlist order"
+        );
         assert!(entries.mosaic().len() <= MOSAIC_TILES);
 
         entries.invalidate();
