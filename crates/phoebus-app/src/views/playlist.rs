@@ -102,7 +102,7 @@ impl Entries {
                 continue;
             };
             self.rows.push((index, id));
-            self.total += track.duration;
+            self.total = self.total.saturating_add(track.duration);
             if self.mosaic.len() < MOSAIC_TILES && !self.mosaic.contains(&track.album_key) {
                 self.mosaic.push(track.album_key.clone());
             }

@@ -333,7 +333,7 @@ impl Library {
             for &i in &members {
                 let t = &tracks[i];
                 album.track_ids.push(t.id);
-                album.duration += t.duration;
+                album.duration = album.duration.saturating_add(t.duration);
                 album.has_artwork |= t.has_artwork;
                 if album.year.is_none() {
                     album.year = t.year;
@@ -394,7 +394,7 @@ impl Library {
         });
         let tracks_sorted: Vec<TrackId> = order.iter().map(|&i| tracks[i].id).collect();
 
-        let total_duration = tracks.iter().map(|t| t.duration).sum();
+        let total_duration = sum_durations(tracks.iter().map(|t| t.duration));
         let mut map: HashMap<TrackId, Track> = HashMap::with_capacity(tracks.len());
         for t in tracks {
             if let Some(previous) = map.insert(t.id, t) {
@@ -531,16 +531,25 @@ impl Library {
 
     /// Sum of the durations of a set of tracks (for playlist headers).
     pub fn duration_of(&self, ids: &[TrackId]) -> Duration {
-        ids.iter()
-            .filter_map(|id| self.tracks.get(id))
-            .map(|t| t.duration)
-            .sum()
+        sum_durations(
+            ids.iter()
+                .filter_map(|id| self.tracks.get(id))
+                .map(|t| t.duration),
+        )
     }
 
     /// Every track, in no particular order — what the snapshot stores, and what a rescan
     /// hands back to the scanner as already known.
     pub fn tracks(&self) -> impl Iterator<Item = &Track> {
         self.tracks.values()
+    }
+
+    /// True when `tracks` — which must not repeat a track — are exactly the tracks of this
+    /// library, field for field. How a finished scan tells that it found nothing new
+    /// compared with what it started from, without building a second library.
+    pub fn holds_exactly(&self, tracks: &[Track]) -> bool {
+        self.tracks.len() == tracks.len()
+            && tracks.iter().all(|t| self.tracks.get(&t.id) == Some(t))
     }
 
     /// The albums whose tracks differ between `self` and `newer`.
@@ -572,6 +581,17 @@ impl Library {
         }
         changed
     }
+}
+
+/// Sum of `durations`, clamped at [`Duration::MAX`] instead of overflowing.
+///
+/// A duration is data read from a file or from a snapshot, so no sum of them may panic
+/// (`Duration`'s own `+` and `sum` do, past `u64::MAX` seconds): a damaged `library.json`
+/// must cost a rescan, never every launch.
+pub fn sum_durations(durations: impl IntoIterator<Item = Duration>) -> Duration {
+    durations
+        .into_iter()
+        .fold(Duration::ZERO, Duration::saturating_add)
 }
 
 /// Disc → track → title → path ordering, used inside albums and as a tiebreak elsewhere.
@@ -1013,6 +1033,21 @@ mod tests {
         let json = serde_json::to_string(&tr).expect("a non-UTF-8 path must not fail the save");
         let back: Track = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.source_path, Some(real));
+    }
+
+    /// Durations come from files and snapshots, so summing them must clamp, not panic.
+    #[test]
+    fn huge_durations_saturate_instead_of_overflowing() {
+        let mut a = t("A/One/01 x.mp3", 0, 1);
+        a.duration = Duration::MAX;
+        let mut b = t("A/One/02 y.mp3", 0, 1);
+        b.duration = Duration::from_secs(60);
+        let ids = [a.id, b.id];
+        let lib = Library::build("/lib", vec![a, b]);
+        assert_eq!(lib.total_duration(), Duration::MAX);
+        assert_eq!(lib.duration_of(&ids), Duration::MAX);
+        let album = lib.album(&AlbumKey::new("A", "One")).expect("album");
+        assert_eq!(album.duration, Duration::MAX);
     }
 
     #[test]

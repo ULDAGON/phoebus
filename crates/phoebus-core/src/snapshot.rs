@@ -23,8 +23,16 @@
 //!   the root in Settings can never flash the old root's music under the new one's name.
 //! * **Written atomically** ([`paths::write_atomic`]), like every other file Phoebus owns: a
 //!   crash mid-save leaves the previous snapshot, never half of a new one.
+//! * **A snapshot of nothing is nothing.** An empty library is never written and an empty
+//!   file is never loaded: an unmounted music volume scans as zero tracks, and that must
+//!   neither destroy the good snapshot nor make the next launch believe it has a library
+//!   to show.
+//! * **Saves are serialised and re-checked** ([`save_scan`]): a scan the app has given up on
+//!   cannot publish its snapshot after the scan that replaced it.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -35,6 +43,14 @@ use crate::paths;
 /// Format version of `library.json`. Bump it whenever the stored form of a [`Track`]
 /// changes; every older (and newer) snapshot is then ignored and rebuilt by one full scan.
 pub const VERSION: u32 = 1;
+
+/// The longest track a snapshot may hold: a year. No audio file is longer; a snapshot that
+/// claims one is damaged or hostile, and is passed over like any other corrupt file (a
+/// rescan reads the real value) instead of feeding absurd sums to every view.
+const MAX_TRACK_DURATION: Duration = Duration::from_secs(366 * 24 * 60 * 60);
+
+/// Held from the last "is this save still wanted?" check to the rename that publishes it.
+static SAVE_LOCK: Mutex<()> = Mutex::new(());
 
 /// The file as written. Borrowed, so saving a library clones nothing.
 #[derive(Serialize)]
@@ -66,13 +82,93 @@ struct Body {
 /// Fails only on I/O, or when the root is not valid UTF-8 (JSON cannot hold it); the app
 /// logs that and carries on without a snapshot.
 pub fn save(path: &Path, library: &Library) -> Result<()> {
+    let json = encode(library)?;
+    let _turn = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    paths::write_atomic(path, &json)
+}
+
+fn encode(library: &Library) -> Result<Vec<u8>> {
     let out = Out {
         version: VERSION,
         root: library.root(),
         tracks: library.tracks().collect(),
     };
-    let json = serde_json::to_vec(&out).context("encoding the library snapshot")?;
-    paths::write_atomic(path, &json)
+    serde_json::to_vec(&out).context("encoding the library snapshot")
+}
+
+/// What [`save_scan`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Saved {
+    /// The snapshot at the path is now this library.
+    Written,
+    /// The scan found exactly what it started from, and the file is there: nothing to do.
+    Unchanged,
+    /// The library is empty. Not written, and the existing file is left alone — see the
+    /// module docs.
+    Empty,
+    /// The caller no longer wants this save (its root changed under the scan).
+    Superseded,
+}
+
+/// Publish the result of a finished scan as the snapshot, unless there is a reason not to.
+///
+/// `previous` is what the scan started from — the tracks of the snapshot it was seeded
+/// with, or of the library on screen. `superseded` says whether the result is still
+/// wanted. It is asked once more right before the file is renamed into place, while holding
+/// the lock every save takes, because serialising and syncing are slow enough for the
+/// answer to change: without that, the save of a scan of the old root could land after the
+/// new root's and put the wrong library under the right name — harmless to the app (the
+/// root is part of the key) but a full scan at the next launch.
+pub fn save_scan(
+    path: &Path,
+    previous: &[Track],
+    library: &Library,
+    superseded: impl Fn() -> bool,
+) -> Result<Saved> {
+    if library.is_empty() {
+        return Ok(Saved::Empty);
+    }
+    if library.holds_exactly(previous) && path.exists() {
+        return Ok(Saved::Unchanged);
+    }
+    let json = encode(library)?;
+    let _turn = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if superseded() {
+        return Ok(Saved::Superseded);
+    }
+    paths::write_atomic(path, &json)?;
+    Ok(Saved::Written)
+}
+
+/// Delete the temp files that crashed saves left in `dir`: `library.json.<pid>.<n>.tmp`
+/// ([`paths::write_atomic`] names them so), and nothing else. Only those not touched for
+/// `older_than`, so another running Phoebus's save in flight is safe. Returns how many went.
+pub fn remove_stale_temp_files(dir: &Path, older_than: Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let now = SystemTime::now();
+    let mut removed = 0;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !(name.starts_with("library.json.") && name.ends_with(".tmp")) {
+            continue;
+        }
+        let idle = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|at| now.duration_since(at).ok());
+        if !idle.is_some_and(|idle| idle >= older_than) {
+            continue;
+        }
+        match std::fs::remove_file(entry.path()) {
+            Ok(()) => removed += 1,
+            Err(e) => log::warn!("snapshot: stale {name} stayed behind: {e}"),
+        }
+    }
+    removed
 }
 
 /// The library stored at `path`, if it is a current snapshot of `root`.
@@ -124,6 +220,17 @@ pub fn load(path: &Path, root: &Path, covers_dir: &Path) -> Option<Library> {
             return None;
         }
     };
+    if body.tracks.is_empty() {
+        log::info!("snapshot: {} holds no tracks; scanning", path.display());
+        return None;
+    }
+    if body.tracks.iter().any(|t| t.duration > MAX_TRACK_DURATION) {
+        log::warn!(
+            "snapshot: {} has a track longer than a year; scanning",
+            path.display()
+        );
+        return None;
+    }
     let tracks = body
         .tracks
         .into_iter()
@@ -272,6 +379,146 @@ mod tests {
                 load(&dirs.library_path(), root, &dirs.covers_dir()).is_none(),
                 "{bad:?} must not load"
             );
+        }
+    }
+
+    /// A valid-JSON snapshot with absurd durations used to overflow the album sums and
+    /// panic inside `Phoebus::new`, so that every launch crashed.
+    #[test]
+    fn a_snapshot_with_absurd_durations_is_ignored_not_a_panic() {
+        let data = tempfile::tempdir().expect("tempdir");
+        let dirs = paths::Dirs::at(data.path());
+        let root = Path::new("/music");
+        save(&dirs.library_path(), &library(root, &dirs.covers_dir())).expect("save");
+        let text = std::fs::read_to_string(dirs.library_path()).expect("read");
+
+        let mut json: serde_json::Value = serde_json::from_str(&text).expect("json");
+        for track in json["tracks"].as_array_mut().expect("tracks") {
+            track["duration"] = serde_json::json!({ "secs": 9223372036854775808u64, "nanos": 0 });
+        }
+        std::fs::write(dirs.library_path(), json.to_string()).expect("write");
+        assert!(load(&dirs.library_path(), root, &dirs.covers_dir()).is_none());
+    }
+
+    /// An unmounted volume scans as nothing; a snapshot of nothing must not pass for a
+    /// library at the next launch.
+    #[test]
+    fn a_snapshot_without_tracks_is_ignored() {
+        let data = tempfile::tempdir().expect("tempdir");
+        let dirs = paths::Dirs::at(data.path());
+        let root = Path::new("/music");
+        let empty = Library::empty_with_covers(root, dirs.covers_dir());
+        save(&dirs.library_path(), &empty).expect("save");
+        assert!(load(&dirs.library_path(), root, &dirs.covers_dir()).is_none());
+    }
+
+    fn tracks_of(lib: &Library) -> Vec<Track> {
+        lib.tracks().cloned().collect()
+    }
+
+    #[test]
+    fn a_scan_that_found_nothing_new_does_not_rewrite_the_snapshot() {
+        let data = tempfile::tempdir().expect("tempdir");
+        let dirs = paths::Dirs::at(data.path());
+        let lib = library(Path::new("/music"), &dirs.covers_dir());
+        let path = dirs.library_path();
+
+        assert_eq!(
+            save_scan(&path, &[], &lib, || false).expect("save"),
+            Saved::Written
+        );
+        let first = std::fs::read(&path).expect("read");
+        std::fs::write(&path, b"marker").expect("write");
+        assert_eq!(
+            save_scan(&path, &tracks_of(&lib), &lib, || false).expect("save"),
+            Saved::Unchanged
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("read"),
+            b"marker",
+            "not rewritten"
+        );
+
+        // A missing file is rewritten even when nothing changed, and a change is saved.
+        std::fs::remove_file(&path).expect("rm");
+        let same = save_scan(&path, &tracks_of(&lib), &lib, || false).expect("save");
+        assert_eq!(same, Saved::Written);
+        assert_eq!(std::fs::read(&path).expect("read"), first);
+        let mut changed = tracks_of(&lib);
+        changed.pop();
+        let again = save_scan(&path, &changed, &lib, || false).expect("save");
+        assert_eq!(again, Saved::Written);
+    }
+
+    /// The unmounted-volume scenario: an empty scan result leaves the good snapshot alone.
+    #[test]
+    fn an_empty_scan_never_replaces_a_snapshot() {
+        let data = tempfile::tempdir().expect("tempdir");
+        let dirs = paths::Dirs::at(data.path());
+        let root = Path::new("/music");
+        let good = library(root, &dirs.covers_dir());
+        let path = dirs.library_path();
+        save(&path, &good).expect("save");
+        let before = std::fs::read(&path).expect("read");
+
+        let empty = Library::empty_with_covers(root, dirs.covers_dir());
+        let saved = save_scan(&path, &tracks_of(&good), &empty, || false).expect("save");
+        assert_eq!(saved, Saved::Empty);
+        assert_eq!(std::fs::read(&path).expect("read"), before);
+        assert!(load(&path, root, &dirs.covers_dir()).is_some());
+    }
+
+    /// The race: the old scan passes its first check, then waits behind the new scan's
+    /// save. The answer must be taken again once its turn comes.
+    #[test]
+    fn a_save_is_rechecked_when_its_turn_comes() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let data = tempfile::tempdir().expect("tempdir");
+        let dirs = paths::Dirs::at(data.path());
+        let lib = library(Path::new("/music"), &dirs.covers_dir());
+        let path = dirs.library_path();
+        let wanted_no_more = AtomicBool::new(false);
+
+        let turn = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let outcome = std::thread::scope(|s| {
+            let old_scan = s.spawn(|| {
+                save_scan(&path, &[], &lib, || wanted_no_more.load(Ordering::Acquire))
+                    .expect("save")
+            });
+            std::thread::sleep(Duration::from_millis(100)); // let it reach the lock
+            wanted_no_more.store(true, Ordering::Release);
+            drop(turn);
+            old_scan.join().expect("thread")
+        });
+        assert_eq!(outcome, Saved::Superseded);
+        assert!(!path.exists(), "the superseded save wrote nothing");
+    }
+
+    #[test]
+    fn only_old_library_temp_files_are_removed() {
+        let data = tempfile::tempdir().expect("tempdir");
+        let dir = data.path();
+        let stale = ["library.json.123.0.tmp", "library.json.9.41.tmp"];
+        let keep = [
+            "library.json",
+            "state.json.123.0.tmp",
+            "library.json.tmp.bak",
+            "notes.tmp",
+        ];
+        for name in stale.iter().chain(&keep) {
+            std::fs::write(dir.join(name), b"x").expect("write");
+        }
+        assert_eq!(
+            remove_stale_temp_files(dir, Duration::from_secs(3600)),
+            0,
+            "too fresh"
+        );
+        assert_eq!(remove_stale_temp_files(dir, Duration::ZERO), 2);
+        for name in stale {
+            assert!(!dir.join(name).exists(), "{name}");
+        }
+        for name in keep {
+            assert!(dir.join(name).exists(), "{name}");
         }
     }
 }

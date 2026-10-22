@@ -40,6 +40,10 @@ enum ScanMsg {
     Done(Box<Library>),
 }
 
+/// How long a `library.json.*.tmp` must lie untouched before startup deletes it. A save
+/// takes seconds at most.
+const STALE_TEMP_AGE: Duration = Duration::from_secs(300);
+
 /// How a scan shows itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ScanMode {
@@ -57,9 +61,10 @@ struct Scan {
     rx: Receiver<ScanMsg>,
     progress: ScanProgress,
     mode: ScanMode,
-    /// Set when the app stops waiting for this scan (the root changed under it). The thread
-    /// still finishes — a walk cannot be interrupted — but it then leaves the snapshot alone,
-    /// so a scan of the old root cannot overwrite the new root's.
+    /// Set when the app stops waiting for this scan (the root changed under it). The scan
+    /// sees it between files and between albums and stops, in particular before it touches
+    /// the shared cover cache again, and its thread then leaves the snapshot alone — so a
+    /// scan of the old root cannot overwrite what the new root's scan keeps there.
     abandoned: Arc<AtomicBool>,
 }
 
@@ -213,6 +218,14 @@ impl Phoebus {
         } else {
             app.set_theme(&cc.egui_ctx, mode, accent);
         }
+        // Temp files of saves that a crash cut short; untouched for this long, they are not
+        // another window's save in flight.
+        if let Some(data) = app.dirs.library_path().parent() {
+            let gone = snapshot::remove_stale_temp_files(data, STALE_TEMP_AGE);
+            if gone > 0 {
+                log::info!("snapshot: removed {gone} stale temp file(s)");
+            }
+        }
         app.open_library();
         app
     }
@@ -332,8 +345,8 @@ impl Phoebus {
     /// With a usable snapshot ([`snapshot::load`]: this root, this format) the library is on
     /// screen before the first frame and a quiet scan checks it behind the user's back —
     /// reusing every snapshot track whose file has not changed, so it costs a `stat` per
-    /// file instead of a tag read. Without one (first launch, a new root, a damaged file)
-    /// it is the old way: the scanning screen, and a full scan.
+    /// file instead of a tag read. Without one (first launch, a new root, a damaged file, one
+    /// that holds no tracks) it is the old way: the scanning screen, and a full scan.
     ///
     /// Loading on the UI thread is deliberate. It is one file read and one JSON parse —
     /// tens of milliseconds for thousands of tracks — and a library that arrived a frame
@@ -354,19 +367,21 @@ impl Phoebus {
                 );
                 let known: Vec<Track> = library.tracks().cloned().collect();
                 self.install(library);
-                self.start_scan(ScanMode::Quiet, known);
+                self.start_scan(ScanMode::Quiet, known, true);
             }
-            None => self.start_scan(ScanMode::Blocking, Vec::new()),
+            None => self.start_scan(ScanMode::Blocking, Vec::new(), true),
         }
     }
 
     /// Start a scan of [`Phoebus::root`], unless one is already running.
     ///
-    /// `known` is what the scan may reuse for files whose size and mtime are unchanged
-    /// ([`scanner::rescan_with_covers_progress`]); empty means every file is read. The
-    /// thread saves the result as the next launch's snapshot before handing it over — off
-    /// the UI thread, and only if the app still wants it.
-    fn start_scan(&mut self, mode: ScanMode, known: Vec<Track>) {
+    /// `known` is the tracks already in hand — the snapshot's, or the library on screen. With
+    /// `reuse` the scan takes over those whose file size and mtime are unchanged
+    /// ([`scanner::rescan_with_covers_progress`]); without it every file is read. Either way
+    /// `known` is what the result is compared with: the thread saves the result as the next
+    /// launch's snapshot before handing it over — off the UI thread, only if the app still
+    /// wants it, only if it differs ([`snapshot::save_scan`]).
+    fn start_scan(&mut self, mode: ScanMode, known: Vec<Track>, reuse: bool) {
         if self.scan.is_some() {
             return;
         }
@@ -383,22 +398,37 @@ impl Phoebus {
             .name("phoebus-scan".to_string())
             .spawn(move || {
                 let started = Instant::now();
-                let library = scanner::rescan_with_covers_progress(&root, &covers, known, |p| {
-                    // Drop `current` here rather than shipping a heap-allocated path per
-                    // audio file down an unbounded channel: the scanning screen shows the
-                    // phase and the counts, and nothing in the crate reads the name.
-                    let _ =
-                        progress_tx.send(ScanMsg::Progress(ScanProgress { current: None, ..p }));
-                });
+                // What the result is compared with before it is saved.
+                let previous = known.clone();
+                let seed = if reuse { known } else { Vec::new() };
+                let library = scanner::rescan_cancellable(
+                    &root,
+                    &covers,
+                    seed,
+                    || thread_abandoned.load(Ordering::Acquire),
+                    |p| {
+                        // Drop `current` here rather than shipping a heap-allocated path
+                        // per audio file down an unbounded channel: the scanning screen
+                        // shows the phase and the counts, and nothing in the crate reads
+                        // the name.
+                        let _ = progress_tx
+                            .send(ScanMsg::Progress(ScanProgress { current: None, ..p }));
+                    },
+                );
                 log::info!(
                     "scan: {} finished in {} ms",
                     root.display(),
                     started.elapsed().as_millis()
                 );
-                if !thread_abandoned.load(Ordering::Acquire)
-                    && let Err(e) = snapshot::save(&snapshot_path, &library)
-                {
-                    log::warn!("snapshot: not saved, the next launch scans again: {e:#}");
+                let wanted_no_more = || thread_abandoned.load(Ordering::Acquire);
+                if !wanted_no_more() {
+                    match snapshot::save_scan(&snapshot_path, &previous, &library, wanted_no_more) {
+                        Ok(snapshot::Saved::Written) => log::info!("snapshot: saved"),
+                        Ok(saved) => log::info!("snapshot: not rewritten ({saved:?})"),
+                        Err(e) => {
+                            log::warn!("snapshot: not saved, the next launch scans again: {e:#}");
+                        }
+                    }
                 }
                 let _ = tx.send(ScanMsg::Done(Box::new(library)));
             });
@@ -524,7 +554,8 @@ impl Phoebus {
         } else {
             ScanMode::Quiet
         };
-        self.start_scan(mode, Vec::new());
+        let known = self.library.tracks().cloned().collect();
+        self.start_scan(mode, known, false);
     }
 
     /// True while the scanning screen is up instead of the content.
