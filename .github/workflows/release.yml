@@ -16,6 +16,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Rust 1.98.1's rust-objcopy (used to strip macOS release builds) cannot find
+  # libLLVM.dylib and fails the link step; ship unstripped until the toolchain is fixed.
+  CARGO_PROFILE_RELEASE_STRIP: "false"
 
 jobs:
   macos:
