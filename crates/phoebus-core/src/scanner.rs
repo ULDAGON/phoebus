@@ -418,10 +418,9 @@ fn read_track(
             .map(|d| u32::from(d.year))
             .or_else(|| text(tag.get_string(ItemKey::RecordingDate)).and_then(|s| parse_year(&s)))
             .or_else(|| text(tag.get_string(ItemKey::Year)).and_then(|s| parse_year(&s)));
-        // Never filter by PictureType: real files tag their cover as `Other`.
-        if let Some(picture) = tag.pictures().first() {
-            let id = CoverId::of_picture(picture.data());
-            covers.offer(id, picture.data(), path);
+        if let Some(data) = cover_picture(tag, path) {
+            let id = CoverId::of_picture(data);
+            covers.offer(id, data, path);
             track.cover = Some(id);
         }
     }
@@ -707,12 +706,40 @@ fn prune_covers(
     }
 }
 
-/// The first embedded picture of a file, whatever its `PictureType`.
+/// The picture of a tag that is the song's cover: the first one the cover cache can
+/// decode, whatever its `PictureType` (real files tag their cover as `Other`).
+///
+/// "Can decode" is PNG or JPEG, told by the leading bytes: those are the only decoders the
+/// app builds `image` with. A WebP or GIF cover, or an ID3 picture that is a `-->` link
+/// rather than an image, would get an id but never a PNG — a cover that counts as one of
+/// an album's covers (a mosaic tile of `♪`) and that the restore pass reads again at every
+/// launch. Such a picture is passed over for the next one; with none left the song has no
+/// cover, and says why once.
+fn cover_picture<'t>(tag: &'t Tag, path: &Path) -> Option<&'t [u8]> {
+    let pictures = tag.pictures();
+    let found = pictures
+        .iter()
+        .map(|p| p.data())
+        .find(|data| is_png_or_jpeg(data));
+    if found.is_none() && !pictures.is_empty() {
+        log::warn!(
+            "scan: {} carries art the cover cache cannot read (only PNG and JPEG); no cover",
+            path.display()
+        );
+    }
+    found
+}
+
+/// Whether `data` starts like a PNG or a JPEG file.
+fn is_png_or_jpeg(data: &[u8]) -> bool {
+    data.starts_with(b"\x89PNG\r\n\x1a\n") || data.starts_with(&[0xFF, 0xD8, 0xFF])
+}
+
+/// The cover picture of a file ([`cover_picture`]), read from disk once more.
 fn first_picture(path: &Path) -> Option<Vec<u8>> {
     let tagged = lofty::read_from_path(path).ok()?;
     let tag: &Tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
-    let pic = tag.pictures().first()?;
-    Some(pic.data().to_vec())
+    cover_picture(tag, path).map(<[u8]>::to_vec)
 }
 
 /// Decode `data`, shrink it to at most [`COVER_MAX_EDGE`] on its longest edge with Lanczos3,
@@ -794,6 +821,25 @@ mod tests {
         );
         tag.save_to_path(path, WriteOptions::default())
             .expect("embed cover");
+    }
+
+    /// A WAV whose ID3v2 tag carries `pictures`, in this order.
+    fn write_wav_with_pictures(path: &Path, pictures: Vec<Vec<u8>>) {
+        use lofty::config::WriteOptions;
+        use lofty::picture::{Picture, PictureType};
+        use lofty::tag::{Tag, TagExt, TagType};
+
+        write_wav(path, 200);
+        let mut tag = Tag::new(TagType::Id3v2);
+        for data in pictures {
+            tag.push_picture(
+                Picture::unchecked(data)
+                    .pic_type(PictureType::Other)
+                    .build(),
+            );
+        }
+        tag.save_to_path(path, WriteOptions::default())
+            .expect("embed pictures");
     }
 
     fn set_mtime(path: &Path, at: SystemTime) {
@@ -1193,6 +1239,41 @@ mod tests {
             "older than the scan by the margin, and unused"
         );
         assert!(lib.cover_path(cover).exists(), "a used cover always stays");
+    }
+
+    /// Only a picture the cache can decode becomes a cover: a GIF first in the tag is passed
+    /// over for the PNG behind it, and a song with only undecodable art has no cover — so
+    /// it neither turns its album into a mosaic of `♪` tiles nor fails the cache.
+    #[test]
+    fn only_png_or_jpeg_art_becomes_a_cover() {
+        let music = tempfile::tempdir().expect("tempdir");
+        let covers = tempfile::tempdir().expect("tempdir");
+        let root = music.path();
+        let gif = b"GIF89a\x01\x00\x01\x00 not decodable here".to_vec();
+        let link = b"-->https://example.com/cover.jpg".to_vec();
+        let png = png_bytes(24);
+        write_wav_with_pictures(&root.join("HOME/Odyssey/01 a.wav"), vec![png.clone()]);
+        write_wav_with_pictures(
+            &root.join("HOME/Odyssey/02 b.wav"),
+            vec![gif.clone(), png.clone()],
+        );
+        write_wav_with_pictures(&root.join("HOME/Odyssey/03 c.wav"), vec![gif, link]);
+
+        let lib = scan_with_covers(root, covers.path());
+        let cover_of = |rel: &str| lib.track(TrackId::for_rel_path(rel)).and_then(|t| t.cover);
+        let png_id = CoverId::of_picture(&png);
+        assert_eq!(cover_of("HOME/Odyssey/01 a.wav"), Some(png_id));
+        assert_eq!(
+            cover_of("HOME/Odyssey/02 b.wav"),
+            Some(png_id),
+            "the GIF is passed over for the PNG"
+        );
+        assert_eq!(cover_of("HOME/Odyssey/03 c.wav"), None, "nothing decodable");
+        let album = lib.album(&AlbumKey::new("HOME", "Odyssey")).expect("album");
+        assert_eq!(album.mosaic(), &[png_id], "one cover, no ♪ tile");
+        assert_eq!(cache_files(covers.path()), vec![png_id.file_name()]);
+        assert!(is_png_or_jpeg(&[0xFF, 0xD8, 0xFF, 0xE0]));
+        assert!(!is_png_or_jpeg(b"RIFF\0\0\0\0WEBPVP8 "));
     }
 
     /// Scans take turns on the cover cache: one that starts while another holds it waits,
