@@ -60,6 +60,10 @@ cache) lives in `~/.phoebus/.phoebus/`, never in your music.
 
 ## Importing
 
+Importing lives in **Settings**, in the IMPORT section between LIBRARY and THEME: a drop
+field, and under it the list of everything imported this session. Files can be dropped
+anywhere on the window — Settings opens scrolled to IMPORT to show them.
+
 An import behaves like dropping the same files onto Apple Music. Which way it goes depends
 on the library root:
 
@@ -131,7 +135,7 @@ lives in `assets/icon/` as SVG; `scripts/make-icons.sh` regenerates every raster
 ## What it does
 
 - **Views**: Recently Added, Artists, Albums, Songs (sortable, virtualized), per-album
-  pages, Playlists, live Search (`⌘F`), Import.
+  pages, Playlists, live Search (`⌘F`).
 - **Player**: play/pause, prev/next, seek, volume, shuffle, repeat (off/all/one),
   Up Next queue with Play Next / Play Later, playback history.
 - **Playlists**: create, rename inline, delete, reorder; add songs from any right-click
@@ -140,14 +144,15 @@ lives in `assets/icon/` as SVG; `scripts/make-icons.sh` regenerates every raster
   context; hand-queued songs always jump the line and survive context switches.
 - **Media keys & Now Playing**: hardware play/pause/next/prev, with title, artist and
   cover art in macOS Control Center (MPRIS on Linux).
-- **Import**: drop songs or whole album folders anywhere on the window. The Import view
-  lists each one as it is processed — cover, title, artist, album, and `QUEUED` /
+- **Import** (in Settings): drop songs or whole album folders anywhere on the window, and
+  Settings opens at its IMPORT section, which lists each one as it is processed — cover, title, artist, album, and `QUEUED` /
   `IMPORTING` / `IMPORTED` / `ALREADY IN LIBRARY` / why it failed — and `✎` on an imported
   row edits title, artist, album, album artist, genre, year, track number and the cover
   (drop a PNG or JPEG while the editor is open). The library rescans by itself when a batch
   is done. See [Importing](#importing).
-- **Settings**: pick the library root (`~` expanded, applied with a rescan) and the look —
-  dark or light, six accent presets or any colour you like. Applied live, saved on the spot.
+- **Settings**: pick the library root (`~` expanded, applied with a rescan), import new
+  music, and the look — dark or light, six accent presets or any colour you like. Applied
+  live, saved on the spot.
 - **Resizable panels**: every vertical divider drags — the sidebar, the Up Next drawer and
   the Artists split.
 - State (volume, view, shuffle/repeat, window, panel widths, root, theme) persists across
