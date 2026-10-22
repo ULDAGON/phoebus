@@ -4,8 +4,7 @@
 
   <!--
     The macOS icon: an Apple Big Sur plate (824 x 824 centred in a 1024 canvas, i.e. the
-    body fills 80.5 % of the canvas and the rest is transparent margin) carrying the mark
-    from assets/icon/reference.jpg.
+    body fills 80.5 % of the canvas and the rest is transparent margin) carrying the mark.
 
     The plate outline is traced from the mask macOS 26 composites for its own apps
     (IconServices' 1024 px render of Music.app, alpha edge sampled at sub-pixel precision,
@@ -13,43 +12,70 @@
     boundary, straight edges between. A superellipse reads visibly rounder at the corner
     shoulders next to stock icons — assets/README.md documents the measurement.
 
-    Mark geometry is the reference bitmap's, expressed against the 824 plate:
-      ring   outer diameter 86.2 %, stroke 13.5 %  ->  r 299.52, stroke-width 111.24
-      play   the reference's rounded equilateral triangle, scaled to 85 % about the centre.
-             Its three corners keep an even gap from the ring instead of touching it.
+    Mark geometry, as fractions of the 824 plate:
+      ring   outer diameter 68.2 %, stroke 12 %  ->  r 231.54 (stroke centre), width 98.88
+      play   equilateral, pointing right, centroid on the ring centre; circumradius 162.07,
+             0.89 of the ring's inner radius 182.10; corners rounded to 5 % of it (8.10)
   -->
 
   <defs>
     <path id="plate" d="M 100.00 361.52 C 100.00 344.84 100.69 328.14 102.20 311.53 C 103.73 294.77 105.13 277.88 109.08 261.53 C 113.14 244.72 117.93 227.76 126.13 212.54 C 135.91 194.38 147.87 177.04 162.45 162.45 C 177.04 147.87 194.38 135.91 212.54 126.13 C 227.76 117.93 244.72 113.14 261.53 109.08 C 277.88 105.13 294.77 103.73 311.53 102.20 C 328.14 100.69 344.84 100.00 361.52 100.00 L 662.48 100.00 C 679.16 100.00 695.86 100.69 712.47 102.20 C 729.23 103.73 746.12 105.13 762.47 109.08 C 779.28 113.14 796.24 117.93 811.46 126.13 C 829.62 135.91 846.96 147.87 861.55 162.45 C 876.13 177.04 888.09 194.38 897.87 212.54 C 906.07 227.76 910.86 244.72 914.92 261.53 C 918.87 277.88 920.27 294.77 921.80 311.53 C 923.31 328.14 924.00 344.84 924.00 361.52 L 924.00 662.48 C 924.00 679.16 923.31 695.86 921.80 712.47 C 920.27 729.23 918.87 746.12 914.92 762.47 C 910.86 779.28 906.07 796.24 897.87 811.46 C 888.09 829.62 876.13 846.96 861.55 861.55 C 846.96 876.13 829.62 888.09 811.46 897.87 C 796.24 906.07 779.28 910.86 762.47 914.92 C 746.12 918.87 729.23 920.27 712.47 921.80 C 695.86 923.31 679.16 924.00 662.48 924.00 L 361.52 924.00 C 344.84 924.00 328.14 923.31 311.53 921.80 C 294.77 920.27 277.88 918.87 261.53 914.92 C 244.72 910.86 227.76 906.07 212.54 897.87 C 194.38 888.09 177.04 876.13 162.45 861.55 C 147.87 846.96 135.91 829.62 126.13 811.46 C 117.93 796.24 113.14 779.28 109.08 762.47 C 105.13 746.12 103.73 729.23 102.20 712.47 C 100.69 695.86 100.00 679.16 100.00 662.48 Z"/>
 
-    <!-- A few per cent lighter at the top: enough to stop the plate reading as a flat
-         sticker in the Dock, not enough to turn a flat brand into a gradient. -->
-    <linearGradient id="plate-fill" x1="512" y1="100" x2="512" y2="924" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#111A24"/>
-      <stop offset="1" stop-color="#0B121A"/>
+    <clipPath id="plate-clip">
+      <use href="#plate"/>
+    </clipPath>
+
+    <!-- Lighter towards the top right: a line 15° off vertical through the centre, its ends
+         half a plate from it. -->
+    <linearGradient id="plate-fill" x1="405.37" y1="909.96" x2="618.63" y2="114.04" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#12161C"/>
+      <stop offset="1" stop-color="#222D3D"/>
     </linearGradient>
 
     <!-- Hairline rim light along the top edge, clipped to the plate so only its inner
          half survives. -->
     <linearGradient id="plate-rim" x1="512" y1="100" x2="512" y2="600" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.13"/>
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.23"/>
       <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
     </linearGradient>
 
-    <clipPath id="plate-clip">
-      <use href="#plate"/>
-    </clipPath>
+    <!-- Radius 1.15 x the ring's outer radius. -->
+    <radialGradient id="mark-fill" cx="512" cy="512" r="323.13" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFF46A"/>
+      <stop offset="1" stop-color="#FFF829"/>
+    </radialGradient>
+
+    <!-- Uncoloured, so each use paints it: the mark itself, and the mask for its grain. -->
+    <g id="mark">
+      <circle cx="512" cy="512" r="231.54" fill="none" stroke-width="98.88"/>
+      <path stroke="none" d="M 661.92 504.98 A 8.10 8.10 0 0 1 661.92 519.02 L 443.12 645.34 A 8.10 8.10 0 0 1 430.96 638.32 L 430.96 385.68 A 8.10 8.10 0 0 1 443.12 378.66 Z"/>
+    </g>
+
+    <mask id="mark-mask">
+      <use href="#mark" fill="white" stroke="white"/>
+    </mask>
+
+    <!-- Grey film grain: fractal noise with its red channel copied to all three and alpha
+         forced to 1. Blended with `overlay`, mid-grey leaves the colour beneath alone and
+         the noise only lightens or darkens it. -->
+    <filter id="field-noise" x="0" y="0" width="1024" height="1024" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.35" numOctaves="2" seed="7" stitchTiles="stitch"/>
+      <feColorMatrix values="1 0 0 0 0  1 0 0 0 0  1 0 0 0 0  0 0 0 0 1"/>
+    </filter>
+    <filter id="mark-noise" x="0" y="0" width="1024" height="1024" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.71" numOctaves="2" seed="13" stitchTiles="stitch"/>
+      <feColorMatrix values="1 0 0 0 0  1 0 0 0 0  1 0 0 0 0  0 0 0 0 1"/>
+    </filter>
   </defs>
 
   <use href="#plate" fill="url(#plate-fill)"/>
+  <g clip-path="url(#plate-clip)" opacity="0.6" style="mix-blend-mode:overlay">
+    <rect width="1024" height="1024" filter="url(#field-noise)"/>
+  </g>
 
-  <!-- The mark sits at 0.85 of its measured size: the reference bitmap runs the ring to
-       86.2 % of the plate, which crowds the Dock tile, so the whole group is scaled down
-       about the plate centre (ring outer diameter now ~73 % of the plate). -->
-  <g fill="#FEFB54" transform="translate(512 512) scale(0.85) translate(-512 -512)">
-    <circle cx="512" cy="512" r="299.52" fill="none" stroke="#FEFB54" stroke-width="111.24"/>
-    <path transform="translate(512 512) scale(0.85) translate(-512 -512)"
-          d="M 743.71 533.12 L 414.44 723.22 A 24.39 24.39 0 0 1 377.86 702.10 L 377.85 321.90 A 24.39 24.39 0 0 1 414.44 300.78 L 743.70 490.88 A 24.39 24.39 0 0 1 743.71 533.12 Z"/>
+  <use href="#mark" fill="url(#mark-fill)" stroke="url(#mark-fill)"/>
+  <g opacity="0.6" style="mix-blend-mode:overlay">
+    <rect width="1024" height="1024" filter="url(#mark-noise)" mask="url(#mark-mask)"/>
   </g>
 
   <use href="#plate" fill="none" stroke="url(#plate-rim)" stroke-width="4" clip-path="url(#plate-clip)"/>

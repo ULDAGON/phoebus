@@ -538,6 +538,7 @@ impl Phoebus {
         // playlist later to find the popup still standing would be a haunting, not a
         // convenience.
         self.vstate.playlist.close_picker();
+        self.vstate.scroll_top = true;
         if self.back_stack.len() >= BACK_STACK_CAP {
             self.back_stack.remove(0);
         }
@@ -556,6 +557,7 @@ impl Phoebus {
     /// at `SEARCH ""`. Restoring the query it was left with fixes the common case; an
     /// entry whose query was genuinely empty is dropped instead of shown.
     fn back(&mut self) {
+        self.vstate.scroll_top = false;
         while let Some(entry) = self.back_stack.pop() {
             if entry.view == View::Search {
                 if entry.query.trim().is_empty() {

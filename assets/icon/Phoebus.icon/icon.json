@@ -1,17 +1,24 @@
 {
   "fill" : {
     "linear-gradient" : [
-      "extended-srgb:0.06667,0.10196,0.14118,1.00000",
-      "extended-srgb:0.04314,0.07059,0.10196,1.00000"
+      "extended-srgb:0.13333,0.17647,0.23922,1.00000",
+      "extended-srgb:0.07059,0.08627,0.10980,1.00000"
     ]
   },
   "groups" : [
     {
       "layers" : [
         {
+          "blend-mode" : "overlay",
+          "glass" : false,
+          "image-name" : "mark-grain.png",
+          "name" : "mark-grain",
+          "opacity" : 0.6
+        },
+        {
           "blend-mode" : "normal",
           "fill" : {
-            "solid" : "extended-srgb:0.99608,0.98431,0.32941,1.00000"
+            "solid" : "extended-srgb:1.00000,0.96863,0.23137,1.00000"
           },
           "glass" : false,
           "hidden" : false,
@@ -23,6 +30,27 @@
         "kind" : "neutral",
         "opacity" : 0.35
       },
+      "translucency" : {
+        "enabled" : false,
+        "value" : 0.5
+      }
+    },
+    {
+      "blend-mode" : "overlay",
+      "blur-material" : null,
+      "layers" : [
+        {
+          "glass" : false,
+          "image-name" : "field-grain.png",
+          "name" : "field-grain"
+        }
+      ],
+      "opacity" : 0.6,
+      "shadow" : {
+        "kind" : "none",
+        "opacity" : 0.5
+      },
+      "specular" : false,
       "translucency" : {
         "enabled" : false,
         "value" : 0.5
