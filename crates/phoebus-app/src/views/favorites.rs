@@ -50,6 +50,14 @@ impl State {
         self.selected = None;
     }
 
+    /// Drop the cache after a background rescan, keeping the selected row: a track id is
+    /// the hash of the file's path, so it still names the same song.
+    pub fn library_refreshed(&mut self) {
+        let selected = self.selected;
+        self.invalidate();
+        self.selected = selected;
+    }
+
     /// True while the next [`show`] would re-resolve. Read by the cache test.
     #[cfg(test)]
     fn is_dirty(&self) -> bool {

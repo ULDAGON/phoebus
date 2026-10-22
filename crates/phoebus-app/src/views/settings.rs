@@ -89,6 +89,9 @@ pub struct Info<'a> {
     /// The persisted choice that toggle shows: follow the desktop (`true`, the default)
     /// or paint Phoebus's own theme.
     pub follow_desktop: bool,
+    /// A scan is running behind the library on screen — the one at launch, or a `RESCAN`.
+    /// The button then says so instead of offering a second scan the app would ignore.
+    pub scanning: bool,
 }
 
 impl Info<'_> {
@@ -213,7 +216,12 @@ fn library_section(ui: &mut Ui, cx: &mut Ctx, st: &mut State, info: &Info) {
     // the sidebar footer, and UI-SPEC v1.4 §Sidebar footer moves it here whole. It stays
     // live under `$PHOEBUS_LIBRARY` — rescanning changes no setting, so the env override has
     // nothing to say about it, and it is then the only way to pick up new files.
-    if widgets::secondary_button(ui, "", "RESCAN").clicked() {
+    //
+    // A scan behind the library — every launch starts one — has nothing on screen to say so
+    // except this button, and the counts above, which change when it lands.
+    if info.scanning {
+        widgets::disabled_button(ui, "", "SCANNING…", "the library is being read again");
+    } else if widgets::secondary_button(ui, "", "RESCAN").clicked() {
         cx.act(Action::Rescan);
     }
 }
@@ -393,6 +401,7 @@ mod tests {
             configured: None,
             desktop_theme: false,
             follow_desktop: true,
+            scanning: false,
         };
         assert_eq!(plain.prefill(), "/music/Media");
 

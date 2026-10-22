@@ -14,7 +14,7 @@
 //! Until a texture arrives the caller gets a placeholder: a `BG2` square with a `TEXT_LOW`
 //! `♪`. That is also the permanent look of an album with no artwork.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 
 use crossbeam_channel::{Receiver, Sender};
@@ -100,10 +100,30 @@ impl Artwork {
     }
 
     /// Point the cache at a (new) cover directory and forget every texture. Called when a
-    /// scan finishes, because covers may have been regenerated.
+    /// library replaces the one on screen wholesale — at launch, and when the root changes.
     pub fn reset(&mut self, covers_dir: PathBuf) {
         self.covers_dir = covers_dir;
         self.slots.clear();
+        self.pending.clear();
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// A background rescan finished: forget what it may have changed, and nothing else.
+    ///
+    /// A cover on screen is only dropped when its album is in `changed` — the scan can only
+    /// have rewritten the cache file of an album whose tracks moved. Everything else that is
+    /// already uploaded stays, which is what keeps a rescan that found one new album from
+    /// blanking the whole grid for a frame.
+    ///
+    /// Two kinds of slot go regardless. `Missing` ones, because "no cover" may only have
+    /// meant "not extracted yet" — a cover cache that was cleared, or an album whose art
+    /// the scan just pulled out; each is asked for once more, the next time it is painted.
+    /// And `Loading` ones, because their reply may have been decoded from the file the scan
+    /// just replaced: the generation bump drops every such reply, and a slot left at
+    /// `Loading` would then never be asked for again.
+    pub fn refresh(&mut self, changed: &BTreeSet<AlbumKey>) {
+        self.slots
+            .retain(|key, slot| matches!(slot, Slot::Ready(_)) && !changed.contains(key));
         self.pending.clear();
         self.generation = self.generation.wrapping_add(1);
     }
@@ -340,6 +360,36 @@ mod tests {
             "the fresh decode must be installed"
         );
         assert!(art.is_idle());
+    }
+
+    /// A quiet rescan keeps every uploaded cover except the changed albums', and gives
+    /// every placeholder one more chance.
+    #[test]
+    fn a_refresh_drops_only_the_changed_and_the_unsettled_covers() {
+        let ctx = Context::default();
+        let mut art = Artwork::new();
+        art.reset(PathBuf::from("/nonexistent/covers"));
+        let [kept, changed, missing, loading] =
+            ["kept", "changed", "missing", "loading"].map(|a| AlbumKey::new(a, "Album"));
+        let image = || egui::ColorImage::filled([1, 1], egui::Color32::WHITE);
+        for key in [&kept, &changed] {
+            let tex = ctx.load_texture("t", image(), egui::TextureOptions::LINEAR);
+            art.slots
+                .insert(key.clone(), Slot::Ready(Ready { tex, used: 0 }));
+        }
+        art.slots.insert(missing.clone(), Slot::Missing);
+        assert!(art.texture(&loading).is_none(), "enqueued");
+        let before = art.generation;
+
+        art.refresh(&BTreeSet::from([changed.clone()]));
+        assert!(
+            art.texture(&kept).is_some(),
+            "an unchanged cover stays on screen"
+        );
+        assert!(art.generation != before, "in-flight replies are dropped");
+        for key in [&changed, &missing, &loading] {
+            assert!(!art.slots.contains_key(key), "{key} is asked for again");
+        }
     }
 
     #[test]

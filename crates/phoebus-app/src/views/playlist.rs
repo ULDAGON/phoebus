@@ -189,6 +189,16 @@ impl State {
         // them — including, usually, the drop that raised it.
         self.drag = None;
     }
+
+    /// Drop the caches after a background rescan, keeping the selected row. The selection
+    /// is an index into the playlist's own entries, which a rescan does not touch; a drag
+    /// still goes, because which entries resolve to a row — and so the row numbers it is
+    /// expressed in — can change with the library.
+    pub fn library_refreshed(&mut self) {
+        let selected = self.selected;
+        self.invalidate();
+        self.selected = selected;
+    }
 }
 
 /// Draw the view, scrolled to the top if `top`.

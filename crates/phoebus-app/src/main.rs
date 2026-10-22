@@ -13,7 +13,7 @@
 //! | variable | what it does |
 //! |----------|--------------|
 //! | `PHOEBUS_LIBRARY` | the music to scan; wins over the Settings view's root |
-//! | `PHOEBUS_DATA` | the app-data dir (`state.json`, `playlists.json`, `cache/covers/`); default `~/.phoebus/.phoebus` |
+//! | `PHOEBUS_DATA` | the app-data dir (`state.json`, `playlists.json`, `favorites.json`, `library.json`, `cache/covers/`); default `~/.phoebus/.phoebus` |
 //! | `PHOEBUS_THEME` | `dark`/`light`[`,#RRGGBB`] — the palette for one run, never saved |
 //! | `PHOEBUS_START_MUTED` | start at volume 0 without persisting it |
 //! | `PHOEBUS_SHOT_PLAYING` | `--shot-once` auto-plays first, for a populated player bar |
@@ -60,6 +60,8 @@ enum Mode {
 }
 
 fn main() -> eframe::Result {
+    // The clock the launch-time log line ("library: on screen N ms after launch") reads.
+    let launched = std::time::Instant::now();
     let mode = parse_args(std::env::args().skip(1));
     // The self-test's output *is* its result, so only warnings are allowed to interleave
     // with it — symphonia in particular is chatty at `info` while decoding.
@@ -125,7 +127,10 @@ fn main() -> eframe::Result {
             // generic Dock icon an unbundled binary gets.
             icon::set_dock_icon();
             lifecycle::install_reopen_handler(&cc.egui_ctx);
-            Ok(Box::new(app::Phoebus::new(cc, dirs, root, state, capture)) as Box<dyn eframe::App>)
+            Ok(
+                Box::new(app::Phoebus::new(cc, dirs, root, state, capture, launched))
+                    as Box<dyn eframe::App>,
+            )
         }),
     )?;
 
