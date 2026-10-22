@@ -2,7 +2,8 @@
 //!
 //! Keyed by the picture, not the album: a song paints its own cover, an album whose songs
 //! all carry one picture shares one texture between every place that shows it, and a
-//! compilation whose songs each carry their own gets one per song. The scan names each cached PNG by the same id, so a texture can never be
+//! compilation whose songs each carry their own gets one per song ([`paint_mosaic`] for
+//! its card). The scan names each cached PNG by the same id, so a texture can never be
 //! out of date for its key — which is what lets [`Artwork::refresh`] keep every uploaded
 //! one across a rescan.
 //!
@@ -25,7 +26,7 @@ use std::path::PathBuf;
 
 use crossbeam_channel::{Receiver, Sender};
 use egui::{Align2, Context, Rect, Response, Sense, TextureHandle, TextureId, Ui, Vec2};
-use phoebus_core::CoverId;
+use phoebus_core::{CoverId, MOSAIC_TILES};
 
 use crate::theme;
 
@@ -334,16 +335,9 @@ fn decode(path: &std::path::Path) -> Option<egui::ColorImage> {
     ))
 }
 
-/// Draw a cover of `size` at the current cursor and return its response.
+/// Paint a cover into an already-allocated rect.
 ///
 /// `None` (or a cover that has not loaded) paints the placeholder.
-pub fn cover(ui: &mut Ui, art: &mut Artwork, cover: Option<CoverId>, size: f32) -> Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
-    paint_cover(ui, art, cover, rect);
-    response
-}
-
-/// Paint a cover into an already-allocated rect.
 pub fn paint_cover(ui: &Ui, art: &mut Artwork, cover: Option<CoverId>, rect: Rect) {
     let tex = cover.and_then(|c| art.texture(c));
     let painter = ui.painter_at(rect);
@@ -367,6 +361,75 @@ pub fn paint_cover(ui: &Ui, art: &mut Artwork, cover: Option<CoverId>, rect: Rec
             );
         }
     }
+}
+
+/// How a set of distinct covers fills one square.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Layout {
+    /// No cover at all: the `♪` placeholder.
+    Placeholder,
+    /// One cover, full size — an ordinary album, or a playlist of one album.
+    Single(CoverId),
+    /// A 2 × 2 mosaic, tiles in reading order. Fewer than four covers repeat from the
+    /// first: two fill a column each (`a b / a b`), three put the first one back in the
+    /// last corner (`a b / c a`).
+    Grid([CoverId; MOSAIC_TILES]),
+}
+
+impl Layout {
+    fn of(covers: &[CoverId]) -> Layout {
+        match covers {
+            [] => Layout::Placeholder,
+            [one] => Layout::Single(*one),
+            many => Layout::Grid(std::array::from_fn(|tile| many[tile % many.len()])),
+        }
+    }
+}
+
+/// Paint a set of distinct covers into a square: one cover, a 2 × 2 mosaic of the first
+/// [`MOSAIC_TILES`], or the `♪` placeholder ([`Layout`]). The playlist header, and the card
+/// and header of an album whose songs carry more than one picture.
+pub fn paint_mosaic(ui: &Ui, art: &mut Artwork, covers: &[CoverId], rect: Rect) {
+    let tiles = match Layout::of(covers) {
+        Layout::Placeholder => return paint_cover(ui, art, None, rect),
+        Layout::Single(cover) => return paint_cover(ui, art, Some(cover), rect),
+        Layout::Grid(tiles) => tiles,
+    };
+    let half = rect.width() * 0.5;
+    for (tile, cover) in tiles.into_iter().enumerate() {
+        let origin = egui::pos2(
+            rect.left() + (tile % 2) as f32 * half,
+            rect.top() + (tile / 2) as f32 * half,
+        );
+        paint_cover(
+            ui,
+            art,
+            Some(cover),
+            Rect::from_min_size(origin, Vec2::splat(half)),
+        );
+    }
+    let painter = ui.painter_at(rect);
+    painter.line_segment(
+        [
+            egui::pos2(rect.center().x, rect.top()),
+            egui::pos2(rect.center().x, rect.bottom()),
+        ],
+        theme::hairline(),
+    );
+    painter.line_segment(
+        [
+            egui::pos2(rect.left(), rect.center().y),
+            egui::pos2(rect.right(), rect.center().y),
+        ],
+        theme::hairline(),
+    );
+}
+
+/// [`paint_mosaic`] at the cursor, `size` square — the album header.
+pub fn mosaic(ui: &mut Ui, art: &mut Artwork, covers: &[CoverId], size: f32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    paint_mosaic(ui, art, covers, rect);
+    response
 }
 
 #[cfg(test)]
@@ -492,5 +555,22 @@ mod tests {
         let mut art = Artwork::new();
         assert!(art.texture(CoverId(7)).is_none());
         assert!(art.is_idle(), "nothing to wait for before the first scan");
+    }
+
+    /// One distinct cover is one cover, whatever else the album holds; more is a mosaic of
+    /// the first four, and two or three repeat to fill it the way playlists always have.
+    #[test]
+    fn one_cover_is_painted_whole_and_more_make_a_mosaic() {
+        let [a, b, c, d, e] = [1, 2, 3, 4, 5].map(CoverId);
+        assert_eq!(Layout::of(&[]), Layout::Placeholder);
+        assert_eq!(Layout::of(&[a]), Layout::Single(a));
+        assert_eq!(Layout::of(&[a, b]), Layout::Grid([a, b, a, b]));
+        assert_eq!(Layout::of(&[a, b, c]), Layout::Grid([a, b, c, a]));
+        assert_eq!(Layout::of(&[a, b, c, d]), Layout::Grid([a, b, c, d]));
+        assert_eq!(
+            Layout::of(&[a, b, c, d, e]),
+            Layout::Grid([a, b, c, d]),
+            "only the first four"
+        );
     }
 }

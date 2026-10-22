@@ -67,12 +67,9 @@ fn back_row(ui: &mut Ui, cx: &mut Ctx) {
 
 fn header(ui: &mut Ui, cx: &mut Ctx, album: &phoebus_core::Album) {
     ui.horizontal_top(|ui| {
-        artwork::cover(
-            ui,
-            cx.art,
-            album.covers.first().copied(),
-            theme::DETAIL_COVER,
-        );
+        // The same square as the album's card: one cover, or the mosaic of a compilation
+        // whose songs carry their own.
+        artwork::mosaic(ui, cx.art, album.mosaic(), theme::DETAIL_COVER);
         ui.add_space(theme::VIEW_PAD);
         ui.vertical(|ui| {
             let width = ui.available_width();

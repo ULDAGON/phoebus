@@ -29,7 +29,7 @@ use egui::{Key, PointerButton, Pos2, Rect, Sense, Ui, Vec2};
 use phoebus_core::playlists::move_target;
 use phoebus_core::{CoverId, Library, MOSAIC_TILES, Playlist, TrackId};
 
-use crate::artwork::{self, Artwork};
+use crate::artwork;
 use crate::nav::{self, Action, Ctx};
 use crate::theme;
 use crate::views;
@@ -560,7 +560,7 @@ fn header(ui: &mut Ui, cx: &mut Ctx, rename: &mut Option<Rename>, head: Head<'_>
     } = head;
     ui.horizontal_top(|ui| {
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(theme::DETAIL_COVER), Sense::hover());
-        mosaic(ui, cx.art, keys, rect);
+        artwork::paint_mosaic(ui, cx.art, keys, rect);
         ui.add_space(theme::VIEW_PAD);
         ui.vertical(|ui| {
             title(ui, cx, rename, id, name);
@@ -652,47 +652,10 @@ fn title(ui: &mut Ui, cx: &mut Ctx, rename: &mut Option<Rename>, id: u64, name: 
     }
 }
 
-/// Paint the playlist cover: one cover, a 2 × 2 mosaic, or the `♪` placeholder.
-fn mosaic(ui: &Ui, art: &mut Artwork, keys: &[CoverId], rect: Rect) {
-    match keys.len() {
-        0 => artwork::paint_cover(ui, art, None, rect),
-        1 => artwork::paint_cover(ui, art, keys.first().copied(), rect),
-        n => {
-            let half = rect.width() * 0.5;
-            for tile in 0..MOSAIC_TILES {
-                let origin = egui::pos2(
-                    rect.left() + (tile % 2) as f32 * half,
-                    rect.top() + (tile / 2) as f32 * half,
-                );
-                artwork::paint_cover(
-                    ui,
-                    art,
-                    keys.get(tile % n).copied(),
-                    Rect::from_min_size(origin, Vec2::splat(half)),
-                );
-            }
-            let painter = ui.painter_at(rect);
-            painter.line_segment(
-                [
-                    egui::pos2(rect.center().x, rect.top()),
-                    egui::pos2(rect.center().x, rect.bottom()),
-                ],
-                theme::hairline(),
-            );
-            painter.line_segment(
-                [
-                    egui::pos2(rect.left(), rect.center().y),
-                    egui::pos2(rect.right(), rect.center().y),
-                ],
-                theme::hairline(),
-            );
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artwork::Artwork;
     use phoebus_core::Track;
 
     /// Where the song list starts in the test window: the page's own margin, the header's
