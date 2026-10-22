@@ -63,22 +63,34 @@ cache) lives in `~/.phoebus/.phoebus/`, never in your music.
 An import behaves like dropping the same files onto Apple Music. Which way it goes depends
 on the library root:
 
-- **macOS, root inside an Apple Music media folder** (e.g.
+- **macOS, root inside the Apple Music media folder** (e.g.
   `~/Music/Music/Media.localized/Music`): Phoebus hands every file to the Music app, which
   copies it into its media folder and files it its own way — the song shows up in Apple
   Music exactly as if it had been dropped there. Edits of fields and covers go through the
-  Music app too, so it writes the tags and both libraries agree. The first import makes
-  macOS ask once: **"Phoebus wants to control Music"** — allow it (or later under System
-  Settings › Privacy & Security › Automation). Run from a terminal, the prompt names the
-  terminal instead. The Music app does not take FLAC or Ogg; those are refused with a reason.
-  Turn on *Copy files to Music Media folder when adding to Library* in Music's settings, or
-  the Music app keeps pointing at the original file and Phoebus will not see the song.
+  Music app too, so it writes the tags and both libraries agree; only the fields you
+  changed are sent. Which folder counts is read from Music's own settings (the media folder
+  location under *Files*), so a moved media folder or a symlinked root is recognised and an
+  old `iTunes Media` backup is not; only when that setting cannot be read does Phoebus go by
+  the folder's name.
+
+  The first import makes macOS ask once: **"Phoebus wants to control Music"** — allow it (or
+  later under System Settings › Privacy & Security › Automation). Run from a terminal, the
+  prompt names the terminal instead. The Music app does not take FLAC or Ogg; those are
+  refused with a reason. If Music does not answer within ten minutes, the row says
+  `UNKNOWN — CHECK MUSIC` and that file is not offered to Music again in the session, so a
+  second drop cannot add it twice.
+
+  Turn on *Copy files to Music Media folder when adding to Library* in Music's settings.
+  With it off, Music keeps pointing at your original file: Phoebus does not see the song,
+  and its row cannot be edited here, because an edit would change the original.
 - **Linux, or any other root**: Phoebus copies the file to
-  `<root>/<Album Artist>/<Album>/<NN Title>.<ext>` — never overwriting an existing file —
-  and writes edits into the copy's tags.
+  `<root>/<Album Artist>/<Album>/<NN Title>.<ext>` — never overwriting an existing file, on
+  any file system including FAT and exFAT — and writes edits into the copy's tags.
 
 Either way the dropped original is never modified, and a file that already lives inside
-the library root is left alone (`ALREADY IN LIBRARY`). The list lasts for the session.
+the library root is left alone (`ALREADY IN LIBRARY`). An edit that only partly lands
+(say, the fields but not the cover) is shown as `PARTLY SAVED` and keeps what landed. The
+list lasts for the session.
 
 ## Omarchy
 
