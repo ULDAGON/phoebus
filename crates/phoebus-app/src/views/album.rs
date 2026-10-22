@@ -9,8 +9,10 @@ use crate::theme;
 use crate::views;
 use crate::widgets::{self, menus, song_row};
 
-/// Draw the detail page for `key`.
-pub fn show(ui: &mut Ui, cx: &mut Ctx, key: &AlbumKey) {
+/// Draw the detail page for `key`, scrolled to the top if `top`.
+///
+/// Each album keeps its own scroll offset, so a Back lands where the page was left.
+pub fn show(ui: &mut Ui, cx: &mut Ctx, key: &AlbumKey, top: bool) {
     let lib = cx.lib;
     let Some(album) = lib.album(key) else {
         views::page(ui, |ui| {
@@ -21,16 +23,19 @@ pub fn show(ui: &mut Ui, cx: &mut Ctx, key: &AlbumKey) {
     };
 
     views::page(ui, |ui| {
-        egui::ScrollArea::vertical()
-            .id_salt("album-detail")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                back_row(ui, cx);
-                ui.add_space(theme::CARD_TEXT_GAP * 2.0);
-                header(ui, cx, album);
-                ui.add_space(theme::VIEW_PAD);
-                tracklist(ui, cx, album);
-            });
+        let mut area = egui::ScrollArea::vertical()
+            .id_salt(("album-detail", key))
+            .auto_shrink([false, false]);
+        if top {
+            area = area.vertical_scroll_offset(0.0);
+        }
+        area.show(ui, |ui| {
+            back_row(ui, cx);
+            ui.add_space(theme::CARD_TEXT_GAP * 2.0);
+            header(ui, cx, album);
+            ui.add_space(theme::VIEW_PAD);
+            tracklist(ui, cx, album);
+        });
     });
 }
 
@@ -281,7 +286,7 @@ mod tests {
                     fmt: &fmt,
                     actions: &mut actions,
                 };
-                show(ui, &mut cx, &key);
+                show(ui, &mut cx, &key, false);
             });
             delay = out
                 .viewport_output

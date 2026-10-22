@@ -47,6 +47,9 @@ pub struct ViewState {
     pub settings: settings::State,
     /// The playlist the sidebar is asking the user to confirm deleting.
     pub confirm_delete: Option<u64>,
+    /// Set by a fresh open of a page, cleared by Back: the next frame draws the album and
+    /// playlist pages at the top instead of wherever their own scroll offset was left.
+    pub scroll_top: bool,
 }
 
 impl ViewState {
@@ -81,14 +84,15 @@ pub fn route(
     st: &mut ViewState,
     settings: &settings::Info,
 ) {
+    let top = std::mem::take(&mut st.scroll_top);
     match view {
         View::RecentlyAdded => recently::show(ui, cx),
         View::Favorites => favorites::show(ui, cx, &mut st.favorites),
         View::Albums => albums::show(ui, cx, &mut st.albums),
-        View::Album(key) => album::show(ui, cx, key),
+        View::Album(key) => album::show(ui, cx, key, top),
         View::Artists => artists::show(ui, cx, st),
         View::Songs => songs::show(ui, cx, &mut st.songs),
-        View::Playlist(id) => playlist::show(ui, cx, &mut st.playlist, *id),
+        View::Playlist(id) => playlist::show(ui, cx, &mut st.playlist, *id, top),
         View::Search => search::show(ui, cx, &mut st.search, query),
         View::Settings => settings::show(ui, cx, &mut st.settings, settings),
     }
@@ -318,6 +322,138 @@ mod tests {
             });
             // API-FACTS §3.7: dropping unapplied texture deltas panics.
             out.textures_delta.clear();
+        }
+    }
+
+    /// Two 40-track albums and a playlist over each: long enough that every page scrolls.
+    fn long_library() -> (Library, Vec<Playlist>) {
+        let mut tracks = Vec::new();
+        let mut playlists = Vec::new();
+        for (id, album) in (1..).zip(["A", "B"]) {
+            let rels: Vec<String> = (0..40)
+                .map(|n| format!("Long/{album}/{n:02} Track {album}{n:02}.m4a"))
+                .collect();
+            for (n, rel) in rels.iter().enumerate() {
+                tracks.push(make(
+                    rel,
+                    &format!("Track {album}{n:02}"),
+                    "Long",
+                    album,
+                    200,
+                ));
+            }
+            playlists.push(Playlist {
+                id,
+                name: format!("Playlist {id}"),
+                entries: rels,
+                created_at: 0,
+                modified_at: 1,
+            });
+        }
+        (Library::build("/lib", tracks), playlists)
+    }
+
+    /// Run frames of `view` on one persistent context, so egui keeps its scroll offsets
+    /// between calls the way it does in the app. `scroll` is a mouse-wheel delta sent on the
+    /// first frame; `top` is what `Phoebus::navigate` raises. Returns the first text
+    /// containing `needle` with its y: the page's top mark, which changes as the page scrolls.
+    fn page_mark(
+        ctx: &egui::Context,
+        (view, top, scroll): (&View, bool, f32),
+        (lib, pls): (&Library, &[Playlist]),
+        st: &mut ViewState,
+        needle: &str,
+    ) -> String {
+        theme::install(ctx);
+        let mut art = Artwork::new();
+        let fmt = Fmt::build(lib);
+        let mut actions: Vec<Action> = Vec::new();
+        let favs = crate::nav::test_favorites();
+        let info = plain_info();
+        st.scroll_top = top;
+        let mut mark = String::new();
+        for frame in 0..30 {
+            let mut events = vec![egui::Event::PointerMoved(egui::pos2(700.0, 400.0))];
+            if frame == 0 && scroll != 0.0 {
+                events.push(egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -scroll),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(1280.0, 820.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                let mut cx = Ctx {
+                    lib,
+                    art: &mut art,
+                    playlists: pls,
+                    favs: &favs,
+                    now: Now::default(),
+                    fmt: &fmt,
+                    actions: &mut actions,
+                };
+                route(ui, &mut cx, view, "", st, &info);
+            });
+            out.textures_delta.clear();
+            mark = out
+                .shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::Shape::Text(t) if t.galley.text().contains(needle) => {
+                        Some(format!("{} at {}", t.galley.text(), t.pos.y))
+                    }
+                    _ => None,
+                })
+                .unwrap_or_default();
+        }
+        mark
+    }
+
+    /// The scroll contract of the album and playlist pages, on a real egui context: a new
+    /// open starts at the top, also after another page of the same kind was scrolled in
+    /// between, and Back finds the page where it was left.
+    #[test]
+    fn album_and_playlist_pages_open_at_the_top_and_back_restores_them() {
+        let (lib, pls) = long_library();
+        let data = (&lib, pls.as_slice());
+        let album = |name: &str| View::Album(AlbumKey::new("Long", name));
+        let back_row = widgets::spaced("ALBUMS");
+        let rows = "Track A";
+
+        for (page, other, needle) in [
+            (album("A"), album("B"), back_row.as_str()),
+            (View::Playlist(1), View::Playlist(2), rows),
+        ] {
+            let ctx = egui::Context::default();
+            let mut st = ViewState::default();
+            let top = page_mark(&ctx, (&page, true, 0.0), data, &mut st, needle);
+            assert!(!top.is_empty(), "{page:?}: the probe text is on the page");
+
+            let left = page_mark(&ctx, (&page, false, 600.0), data, &mut st, needle);
+            assert_ne!(left, top, "{page:?}: the wheel scrolled it");
+
+            // Open the other page of the same kind, scrolled further, then a fresh open of
+            // `page`: it starts at the top although its own offset is `left`.
+            page_mark(&ctx, (&other, true, 900.0), data, &mut st, needle);
+            let reopened = page_mark(&ctx, (&page, true, 0.0), data, &mut st, needle);
+            assert_eq!(reopened, top, "{page:?}: a new open starts at the top");
+
+            // Scroll it again, leave for `other`, and come Back (no `top`).
+            let left = page_mark(&ctx, (&page, false, 600.0), data, &mut st, needle);
+            page_mark(&ctx, (&other, true, 0.0), data, &mut st, needle);
+            let back = page_mark(&ctx, (&page, false, 0.0), data, &mut st, needle);
+            assert_eq!(
+                back, left,
+                "{page:?}: Back restores the position it was left at"
+            );
         }
     }
 

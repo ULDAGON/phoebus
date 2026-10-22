@@ -191,8 +191,8 @@ impl State {
     }
 }
 
-/// Draw the view.
-pub fn show(ui: &mut Ui, cx: &mut Ctx, st: &mut State, id: u64) {
+/// Draw the view, scrolled to the top if `top`.
+pub fn show(ui: &mut Ui, cx: &mut Ctx, st: &mut State, id: u64, top: bool) {
     // Copy the shared slices out of `cx` first, so they survive the `&mut cx` below.
     let (lib, playlists) = (cx.lib, cx.playlists);
     let Some(playlist) = playlists.iter().find(|p| p.id == id) else {
@@ -251,59 +251,62 @@ pub fn show(ui: &mut Ui, cx: &mut Ctx, st: &mut State, id: u64) {
         // One extra "row" past the end: the `+ ADD SONGS` foot. Inside the scroller and on
         // the list's own 40 px rhythm, so it scrolls with the songs and reads as the last
         // line of the list rather than as a fourth button in the header.
-        let out = egui::ScrollArea::vertical()
-            .id_salt("playlist-rows")
-            .auto_shrink([false, false])
-            .show_rows(ui, widgets::ROW_H, rows.len() + 1, |ui, range| {
-                for i in range {
-                    let Some(&(entry, track)) = rows.get(i) else {
-                        open_picker |= add_songs_row(ui);
-                        break;
-                    };
-                    let row = song_row::draggable(
-                        ui,
-                        cx,
-                        track,
-                        current == Some(entry) || picked == Some(entry),
-                    );
-                    if anchor.is_none() {
-                        anchor = Some((i, row.response.rect));
-                    }
-                    // Primary button only: a right-press must stay a context menu, and a
-                    // middle-press must not silently reorder anything.
-                    if row.response.drag_started_by(PointerButton::Primary) {
-                        started = Some(entry);
-                    }
-                    if row.response.clicked() {
-                        selection = Some(entry);
-                    }
-                    if row.response.double_clicked() || row.lead == song_row::Lead::PlayRow {
-                        cx.act(Action::Play {
-                            tracks: rows.iter().map(|(_, t)| *t).collect(),
-                            index: i,
-                            shuffle: false,
-                        });
-                    }
-                    if row.lead == song_row::Lead::TogglePlay {
-                        cx.act(Action::TogglePlay);
-                    }
-                    let neighbours = (
-                        i.checked_sub(1).and_then(|p| rows.get(p)).map(|r| r.0),
-                        rows.get(i + 1).map(|r| r.0),
-                    );
-                    row.response.context_menu(|ui| {
-                        menus::track_menu(ui, cx, &[track], Some(menus::Nav::both(track)));
-                        ui.separator();
-                        row_menu(ui, cx, id, entry, neighbours);
-                    });
-                    // The `⋯` button, same menu, left click (UI-SPEC v1.2 §Track rows).
-                    egui::Popup::menu(&row.more).show(|ui| {
-                        menus::track_menu(ui, cx, &[track], Some(menus::Nav::both(track)));
-                        ui.separator();
-                        row_menu(ui, cx, id, entry, neighbours);
+        let mut area = egui::ScrollArea::vertical()
+            .id_salt(("playlist-rows", id))
+            .auto_shrink([false, false]);
+        if top {
+            area = area.vertical_scroll_offset(0.0);
+        }
+        let out = area.show_rows(ui, widgets::ROW_H, rows.len() + 1, |ui, range| {
+            for i in range {
+                let Some(&(entry, track)) = rows.get(i) else {
+                    open_picker |= add_songs_row(ui);
+                    break;
+                };
+                let row = song_row::draggable(
+                    ui,
+                    cx,
+                    track,
+                    current == Some(entry) || picked == Some(entry),
+                );
+                if anchor.is_none() {
+                    anchor = Some((i, row.response.rect));
+                }
+                // Primary button only: a right-press must stay a context menu, and a
+                // middle-press must not silently reorder anything.
+                if row.response.drag_started_by(PointerButton::Primary) {
+                    started = Some(entry);
+                }
+                if row.response.clicked() {
+                    selection = Some(entry);
+                }
+                if row.response.double_clicked() || row.lead == song_row::Lead::PlayRow {
+                    cx.act(Action::Play {
+                        tracks: rows.iter().map(|(_, t)| *t).collect(),
+                        index: i,
+                        shuffle: false,
                     });
                 }
-            });
+                if row.lead == song_row::Lead::TogglePlay {
+                    cx.act(Action::TogglePlay);
+                }
+                let neighbours = (
+                    i.checked_sub(1).and_then(|p| rows.get(p)).map(|r| r.0),
+                    rows.get(i + 1).map(|r| r.0),
+                );
+                row.response.context_menu(|ui| {
+                    menus::track_menu(ui, cx, &[track], Some(menus::Nav::both(track)));
+                    ui.separator();
+                    row_menu(ui, cx, id, entry, neighbours);
+                });
+                // The `⋯` button, same menu, left click (UI-SPEC v1.2 §Track rows).
+                egui::Popup::menu(&row.more).show(|ui| {
+                    menus::track_menu(ui, cx, &[track], Some(menus::Nav::both(track)));
+                    ui.separator();
+                    row_menu(ui, cx, id, entry, neighbours);
+                });
+            }
+        });
 
         if let Some(from) = started {
             *drag = Some(Drag { from, gap: None });
@@ -792,7 +795,7 @@ mod tests {
                     fmt: &fmt,
                     actions: &mut actions,
                 };
-                show(ui, &mut cx, &mut st, 1);
+                show(ui, &mut cx, &mut st, 1, false);
             });
             // API-FACTS §3.7: dropping unapplied texture deltas panics.
             out.textures_delta.clear();
