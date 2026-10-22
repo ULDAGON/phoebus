@@ -585,16 +585,36 @@ fn write_job(job: &CoverJob) {
     }
 }
 
-/// The covers the cache holds right now: every file in `dir` with a cache name. A missing
-/// or unreadable directory holds none.
+/// The covers the cache holds right now: every non-empty file in `dir` with a cache name.
+/// A missing or unreadable directory holds none.
+///
+/// An empty file is not a cover — the remains of a full disk, or of a copy cut short — and
+/// counting it as one would keep it forever, since a cover on disk is never written again.
+/// Left out, it is overwritten by this scan. (A non-empty file that does not decode is
+/// caught where it is read: the app's cover loader deletes it, and the next scan restores
+/// it.) The size is in the `stat` the listing makes anyway; the bytes are not read.
 fn cached_covers(dir: &Path) -> HashSet<CoverId> {
     let Ok(entries) = fs::read_dir(dir) else {
         return HashSet::new();
     };
     entries
         .filter_map(Result::ok)
+        .filter(|e| e.metadata().is_ok_and(|m| m.is_file() && m.len() > 0))
         .filter_map(|e| e.file_name().to_str().and_then(CoverId::from_file_name))
         .collect()
+}
+
+/// Whether the cached cover at `path` can be handed to something that must not get a bad
+/// image: it exists and starts like a PNG, which every file the cache writes does. One
+/// short read, no decode. The OS Now Playing art is the case: a `cover_url` macOS cannot
+/// load aborts the process.
+pub fn cover_file_is_sound(path: &Path) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 8];
+    fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .is_ok()
+        && head == *b"\x89PNG\r\n\x1a\n"
 }
 
 /// Write the covers the cache lacks although no file changed: the tracks were reused from an
@@ -1257,6 +1277,31 @@ mod tests {
             "older than the scan by the margin, and unused"
         );
         assert!(lib.cover_path(cover).exists(), "a used cover always stays");
+    }
+
+    /// An empty file under a cover's name is not that cover: the next scan writes it, and
+    /// only a file that starts like a PNG counts as sound.
+    #[test]
+    fn an_empty_cache_file_is_written_again() {
+        let music = tempfile::tempdir().expect("tempdir");
+        let covers = tempfile::tempdir().expect("tempdir");
+        let root = music.path();
+        write_wav_with_cover(&root.join("HOME/Odyssey/01 Intro.wav"), 200, 40);
+        let lib = scan_with_covers(root, covers.path());
+        let path = lib.cover_path(only_cover(&lib));
+        assert!(cover_file_is_sound(&path));
+
+        fs::write(&path, b"").expect("empty it");
+        assert!(!cover_file_is_sound(&path));
+        rescan_with_covers_progress(root, covers.path(), lib.tracks().cloned(), |_| {});
+        assert!(
+            cover_file_is_sound(&path),
+            "restored although the track was reused"
+        );
+
+        fs::write(&path, b"not a png at all").expect("garble it");
+        assert!(!cover_file_is_sound(&path));
+        assert!(!cover_file_is_sound(&covers.path().join("missing.png")));
     }
 
     /// The first song carrying a lost cover may no longer yield it (here: damaged in

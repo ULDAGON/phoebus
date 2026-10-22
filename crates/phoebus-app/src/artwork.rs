@@ -313,6 +313,10 @@ fn loader(jobs: &Receiver<Job>, done: &Sender<Done>) {
     }
 }
 
+/// Decode a cached cover. A file that is there but does not decode is deleted: the cache
+/// trusts every file under a cover's name, so a damaged one would otherwise be painted as
+/// `♪` forever. Gone, it is written again by the next scan. Only ever called with a path
+/// inside the covers dir that a [`CoverId`] names.
 fn decode(path: &std::path::Path) -> Option<egui::ColorImage> {
     if !path.exists() {
         return None;
@@ -320,7 +324,13 @@ fn decode(path: &std::path::Path) -> Option<egui::ColorImage> {
     let img = match image::open(path) {
         Ok(img) => img,
         Err(e) => {
-            log::warn!("artwork: {} failed to decode: {e}", path.display());
+            log::warn!(
+                "artwork: {} failed to decode ({e}); removed, the next scan writes it again",
+                path.display()
+            );
+            if let Err(e) = std::fs::remove_file(path) {
+                log::warn!("artwork: {} stayed behind: {e}", path.display());
+            }
             return None;
         }
     };
@@ -548,6 +558,28 @@ mod tests {
             Some(old_tex),
             "the old cover is still its own"
         );
+    }
+
+    /// A damaged cache file is not painted as `♪` forever: the loader deletes it, so the
+    /// next scan finds the cover missing and writes it again.
+    #[test]
+    fn a_cache_file_that_does_not_decode_is_removed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bad = dir.path().join(CoverId(1).file_name());
+        std::fs::write(&bad, b"").expect("write");
+        assert!(decode(&bad).is_none());
+        assert!(!bad.exists(), "an empty file goes");
+        std::fs::write(&bad, b"\x89PNG\r\n\x1a\ntruncated").expect("write");
+        assert!(decode(&bad).is_none());
+        assert!(!bad.exists(), "a damaged file goes");
+
+        let good = dir.path().join(CoverId(2).file_name());
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([0, 0, 255, 255]))
+            .save(&good)
+            .expect("write cover");
+        assert!(decode(&good).is_some());
+        assert!(good.exists(), "a sound file stays");
+        assert!(decode(&dir.path().join(CoverId(3).file_name())).is_none());
     }
 
     #[test]
