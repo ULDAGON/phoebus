@@ -13,10 +13,10 @@
 //!   232 px detail header);
 //! * a cover that is missing or unreadable is remembered as such, so the loader is asked
 //!   exactly once per cover per scan;
-//! * at most [`MAX_TEXTURES`] textures are alive at once. A cover is up to 600 × 600 RGBA
-//!   (~1.4 MB of VRAM), so an unbounded cache would pin gigabytes on a large library.
-//!   The least recently *painted* textures are dropped past the cap and simply reload if
-//!   they come back on screen.
+//! * at most [`MAX_TEXTURES`] textures stay alive once they are off screen. A cover is up
+//!   to 600 × 600 RGBA (~1.4 MB of VRAM), so an unbounded cache would pin gigabytes on a
+//!   large library. The least recently *painted* textures are dropped past the cap and
+//!   simply reload if they come back on screen; what is on screen is never dropped.
 //!
 //! Until a texture arrives the caller gets a placeholder: a `BG2` square with a `TEXT_LOW`
 //! `♪`. That is also the permanent look of a song or album with no artwork.
@@ -30,11 +30,16 @@ use phoebus_core::{CoverId, MOSAIC_TILES};
 
 use crate::theme;
 
-/// How many decoded covers stay resident. One 600 × 600 RGBA texture is ~1.4 MB, so this
-/// caps the cache at roughly 70 MB — several times what any single frame can show (a
-/// 1280 px Albums grid draws ~30 cards, the drawer and the LCD a handful more), which is
-/// what keeps eviction from ever touching something that is on screen.
-const MAX_TEXTURES: usize = 48;
+/// How many decoded covers stay resident once they are off screen. One 600 × 600 RGBA
+/// texture is ~1.4 MB, so this caps the off-screen part of the cache at roughly 90 MB.
+///
+/// A soft cap: a texture painted on this frame or the last one is never evicted
+/// ([`Artwork::evict`]), however many there are. Per-song covers and album mosaics made a
+/// single frame able to show more than any fixed cap — a search for a compilation paints
+/// forty-odd song covers and mosaic tiles, the queue drawer and the LCD more on top, and
+/// an Albums grid of mosaics four per card — and evicting what is on screen meant
+/// decoding and repainting it on every frame. What is on screen is bounded by the screen.
+const MAX_TEXTURES: usize = 64;
 
 /// What the loader thread is asked to do.
 struct Job {
@@ -200,7 +205,12 @@ impl Artwork {
         true
     }
 
-    /// Drop the least recently painted textures past [`MAX_TEXTURES`].
+    /// Drop the least recently painted textures past [`MAX_TEXTURES`] — but never one
+    /// painted on this frame or the last.
+    ///
+    /// The last frame counts because this runs from [`Artwork::pump`], at the start of a
+    /// frame, after the clock has moved on and before anything is painted: what the
+    /// previous frame painted is what is on screen.
     ///
     /// Only `Ready` slots cost VRAM; `Missing` slots are one enum variant each and are
     /// what stops the loader being asked again for a cover that is not there. A dropped
@@ -219,8 +229,9 @@ impl Artwork {
             .slots
             .iter()
             .filter_map(|(key, slot)| match slot {
-                // Never evict something uploaded or painted on this very frame.
-                Slot::Ready(ready) if ready.used != self.frame => Some((ready.used, *key)),
+                Slot::Ready(ready) if self.frame.wrapping_sub(ready.used) > 1 => {
+                    Some((ready.used, *key))
+                }
                 _ => None,
             })
             .collect();
@@ -580,6 +591,52 @@ mod tests {
         assert!(decode(&good).is_some());
         assert!(good.exists(), "a sound file stays");
         assert!(decode(&dir.path().join(CoverId(3).file_name())).is_none());
+    }
+
+    /// More covers on screen than the cap: none of them is evicted (they would be decoded
+    /// and repainted every frame). The cap only ever drops covers that are off screen.
+    #[test]
+    fn eviction_never_drops_a_cover_that_is_on_screen() {
+        let ctx = Context::default();
+        let mut art = Artwork::new();
+        art.reset(PathBuf::from("/nonexistent/covers"));
+        art.frame = 100;
+        let on_screen = MAX_TEXTURES + 20;
+        let off_screen = 30;
+        for i in 0..on_screen + off_screen {
+            let (slot, _) = ready(&ctx);
+            art.slots.insert(CoverId(i as u64), slot);
+            if let Some(Slot::Ready(r)) = art.slots.get_mut(&CoverId(i as u64)) {
+                // Painted on the last frame, or long ago.
+                r.used = if i < on_screen {
+                    99
+                } else {
+                    (i - on_screen) as u64
+                };
+            }
+        }
+        art.evict();
+        for i in 0..on_screen {
+            assert!(
+                matches!(art.slots.get(&CoverId(i as u64)), Some(Slot::Ready(_))),
+                "on-screen cover {i} was evicted"
+            );
+        }
+        assert!(
+            (on_screen..on_screen + off_screen)
+                .all(|i| !art.slots.contains_key(&CoverId(i as u64))),
+            "the off-screen ones go while the screen alone is over the cap"
+        );
+
+        // Off screen again: the cap applies, least recently painted first.
+        art.frame = 200;
+        art.evict();
+        let live = art
+            .slots
+            .values()
+            .filter(|s| matches!(s, Slot::Ready(_)))
+            .count();
+        assert_eq!(live, MAX_TEXTURES);
     }
 
     #[test]
