@@ -232,6 +232,10 @@ pub enum Step {
     Search,
     /// `settings.png` — the Settings view in its default state.
     Settings,
+    /// `settings-import.png` — Settings scrolled to its IMPORT section, with sample rows
+    /// (one per status) and the row editor open. Nothing is imported: the rows are built
+    /// from the library itself.
+    SettingsImport,
     /// `playing.png` — loaded, paused, queue drawer open; the album of `album.png`.
     Playing,
 }
@@ -239,7 +243,7 @@ pub enum Step {
 impl Step {
     /// Every step, in tour order. `Playing` stays last: it is the only step that leaves
     /// audio loaded, so everything photographed before it has an idle player bar.
-    pub const ALL: [Step; 11] = [
+    pub const ALL: [Step; 12] = [
         Step::Recently,
         Step::Albums,
         Step::Album,
@@ -250,6 +254,7 @@ impl Step {
         Step::AddSongs,
         Step::Search,
         Step::Settings,
+        Step::SettingsImport,
         Step::Playing,
     ];
 
@@ -266,6 +271,7 @@ impl Step {
             Step::AddSongs => "add-songs",
             Step::Search => "search",
             Step::Settings => "settings",
+            Step::SettingsImport => "settings-import",
             Step::Playing => "playing",
         }
     }

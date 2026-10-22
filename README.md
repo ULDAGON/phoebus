@@ -54,9 +54,9 @@ Formats: m4a (AAC + ALAC), mp3, flac, ogg, wav, aiff, aac. Tags are read with se
 fallbacks — an untagged `Artist/Album/01 Title.mp3` still lands in the right place.
 
 Point it anywhere in **Settings** (sidebar, bottom) — including straight at
-`~/Music/Music/Media.localized/Music`. Phoebus only ever *reads* the library root: app data
-(state, playlists, cover cache, library snapshot) lives in `~/.phoebus/.phoebus/`, never in
-your music.
+`~/Music/Music/Media.localized/Music`. Phoebus only *reads* the library root — the one exception
+is [importing](#importing), which you start yourself. App data (state, playlists, cover
+cache, library snapshot) lives in `~/.phoebus/.phoebus/`, never in your music.
 
 Launch is instant after the first scan: each scan saves the library to `library.json` in the
 app-data dir, and the next launch shows it at once while a background scan reads only the
@@ -69,6 +69,44 @@ compilation, gets a four-tile mosaic of its first four covers on its card and pa
 songs with the same art share one file. Each scan writes the missing ones and deletes the
 ones no song uses any more. A scan that finds no music (an unmounted drive, for example)
 leaves the cache as it is. Art other than PNG or JPEG is not shown.
+
+## Importing
+
+Importing lives in **Settings**, in the IMPORT section between LIBRARY and THEME: a drop
+field, and under it the list of everything imported this session. Files can be dropped
+anywhere on the window — Settings opens scrolled to IMPORT to show them.
+
+An import behaves like dropping the same files onto Apple Music. Which way it goes depends
+on the library root:
+
+- **macOS, root inside the Apple Music media folder** (e.g.
+  `~/Music/Music/Media.localized/Music`): Phoebus hands every file to the Music app, which
+  copies it into its media folder and files it its own way — the song shows up in Apple
+  Music exactly as if it had been dropped there. Edits of fields and covers go through the
+  Music app too, so it writes the tags and both libraries agree; only the fields you
+  changed are sent. Which folder counts is read from Music's own settings (the media folder
+  location under *Files*), so a moved media folder or a symlinked root is recognised and an
+  old `iTunes Media` backup is not; only when that setting cannot be read does Phoebus go by
+  the folder's name.
+
+  The first import makes macOS ask once: **"Phoebus wants to control Music"** — allow it (or
+  later under System Settings › Privacy & Security › Automation). Run from a terminal, the
+  prompt names the terminal instead. The Music app does not take FLAC or Ogg; those are
+  refused with a reason. If Music does not answer within ten minutes, the row says
+  `UNKNOWN — CHECK MUSIC` and that file is not offered to Music again in the session, so a
+  second drop cannot add it twice.
+
+  Turn on *Copy files to Music Media folder when adding to Library* in Music's settings.
+  With it off, Music keeps pointing at your original file: Phoebus does not see the song,
+  and its row cannot be edited here, because an edit would change the original.
+- **Linux, or any other root**: Phoebus copies the file to
+  `<root>/<Album Artist>/<Album>/<NN Title>.<ext>` — never overwriting an existing file, on
+  any file system including FAT and exFAT — and writes edits into the copy's tags.
+
+Either way the dropped original is never modified, and a file that already lives inside
+the library root is left alone (`ALREADY IN LIBRARY`). An edit that only partly lands
+(say, the fields but not the cover) is shown as `PARTLY SAVED` and keeps what landed. The
+list lasts for the session.
 
 ## Omarchy
 
@@ -118,15 +156,23 @@ lives in `assets/icon/` as SVG; `scripts/make-icons.sh` regenerates every raster
   context; hand-queued songs always jump the line and survive context switches.
 - **Media keys & Now Playing**: hardware play/pause/next/prev, with title, artist and
   the song's cover art in macOS Control Center (MPRIS on Linux).
-- **Settings**: pick the library root (`~` expanded, applied with a rescan) and the look —
-  dark or light, six accent presets or any colour you like. Applied live, saved on the spot.
+- **Import** (in Settings): drop songs or whole album folders anywhere on the window, and
+  Settings opens at its IMPORT section, which lists each one as it is processed — cover,
+  title, artist, album, and `QUEUED` / `IMPORTING` / `IMPORTED` / `ALREADY IN LIBRARY` /
+  why it failed — and `✎` on an imported row edits title, artist, album, album artist,
+  genre, year, track number and the cover (drop a PNG or JPEG while the editor is open).
+  The library rescans by itself when a batch is done — in the background, like the launch
+  rescan, reading only new and changed files. See [Importing](#importing).
+- **Settings**: pick the library root (`~` expanded, applied with a rescan), import new
+  music, and the look — dark or light, six accent presets or any colour you like. Applied
+  live, saved on the spot.
 - **Resizable panels**: every vertical divider drags — the sidebar, the Up Next drawer and
   the Artists split.
 - State (volume, view, shuffle/repeat, window, panel widths, root, theme) persists across
   launches.
 
 Keyboard: `Space` play/pause · `⌘F` search · `⌘←/→` prev/next · `⌘↑/↓` volume · `Esc`
-closes the queue drawer / leaves search. (`Ctrl` on Linux.)
+closes the queue drawer / the import editor / leaves search. (`Ctrl` on Linux.)
 
 ## Environment
 

@@ -1,18 +1,23 @@
 //! The Settings view: where the music lives, and what the app looks like.
 //!
-//! Two sections, exactly as UI-SPEC §Settings and v1.4 §Sidebar footer word them:
+//! Three sections — the two UI-SPEC §Settings and v1.4 §Sidebar footer word, and IMPORT
+//! between them:
 //!
 //! * `LIBRARY` — the root as a text input (pre-filled with what is active), an inline
 //!   `NOT A DIRECTORY` error, `APPLY & RESCAN` and `RESET TO DEFAULT`, a live count of what
 //!   the current root actually yielded, and `RESCAN` for that root as it stands. When
 //!   `$PHOEBUS_LIBRARY` is set it outranks everything, so the input is disabled and says so —
 //!   but `RESCAN` keeps working, since it changes no setting.
+//! * `IMPORT` — the drop field for new songs and the list of what was imported this
+//!   session, with its row editor ([`views::import`]). It sits right under `LIBRARY`
+//!   because it is the other way of putting music into it; a drop anywhere on the window
+//!   brings this view up scrolled to it.
 //! * `THEME` — while a desktop theme file is on offer, a `SOURCE` pair (`DESKTOP`, the
 //!   default, or `STOCK` for Phoebus's own theme); then `DARK`/`LIGHT`, six preset
 //!   swatches, egui's colour picker for anything else, and `RESET` back to the default
 //!   yellow. Every change applies on the next frame and is saved.
 //!
-//! Under both, pinned below the scroll area rather than inside it, sits the build stamp
+//! Under all three, pinned below the scroll area rather than inside it, sits the build stamp
 //! ([`VERSION`]) in the bottom-right corner.
 //!
 //! The view owns none of this: it raises [`Action::Rescan`], [`Action::SetLibraryRoot`],
@@ -106,7 +111,13 @@ impl Info<'_> {
 }
 
 /// Draw the view.
-pub fn show(ui: &mut Ui, cx: &mut Ctx, st: &mut State, info: &Info) {
+pub fn show(
+    ui: &mut Ui,
+    cx: &mut Ctx,
+    st: &mut State,
+    import: &mut views::import::State,
+    info: &Info,
+) {
     views::page(ui, |ui| {
         // The stamp is taken out of the height BEFORE the scroll area rather than drawn
         // inside it: reserving the strip is what pins the line to the bottom-right corner
@@ -120,6 +131,8 @@ pub fn show(ui: &mut Ui, cx: &mut Ctx, st: &mut State, info: &Info) {
             .show(ui, |ui| {
                 views::heading(ui, "SETTINGS");
                 library_section(ui, cx, st, info);
+                ui.add_space(theme::SECTION_GAP);
+                views::import::section(ui, cx.art, import);
                 ui.add_space(theme::SECTION_GAP);
                 theme_section(ui, cx, info);
             });

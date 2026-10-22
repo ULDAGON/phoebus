@@ -56,6 +56,28 @@ enum ScanMode {
     Quiet,
 }
 
+/// Which files a rescan reads again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reread {
+    /// Only new files and those whose size or mtime changed; every other track is taken
+    /// over from the library on screen. What an import asks for: the songs it filed are
+    /// new files, and an edit rewrites the file it edits.
+    Changed,
+    /// Every file — Settings' `RESCAN`.
+    All,
+}
+
+impl Reread {
+    /// One rescan that does what both `self` and `other` ask for.
+    fn and(self, other: Reread) -> Reread {
+        if self == Reread::All || other == Reread::All {
+            Reread::All
+        } else {
+            Reread::Changed
+        }
+    }
+}
+
 /// A scan in flight.
 struct Scan {
     rx: Receiver<ScanMsg>,
@@ -92,6 +114,9 @@ pub struct Phoebus {
     library: Library,
     fmt: Fmt,
     scan: Option<Scan>,
+    /// A rescan was asked for while a scan was running: run one more when it finishes
+    /// ([`Phoebus::rescan`]). Dropped with the scan when the root changes.
+    rescan_queued: Option<Reread>,
     artwork: Artwork,
     controller: Controller,
     /// OS media keys and the Now Playing card. Disabled, never absent, if the platform
@@ -181,6 +206,7 @@ impl Phoebus {
             dirs,
             fmt: Fmt::default(),
             scan: None,
+            rescan_queued: None,
             artwork: Artwork::new(),
             controller,
             media_keys: MediaKeys::new(&cc.egui_ctx),
@@ -212,6 +238,8 @@ impl Phoebus {
         // its width is seeded into `ViewState` here instead and travels back out as an
         // `Action::SetArtistListW`.
         app.vstate.artists.list_w = app.controller.artist_list_w();
+        // Where the Import view sends new songs; kept in step by `set_library_root`.
+        app.vstate.import.set_root(app.root.clone());
         // Before the first frame: nothing above this line paints.
         if app.external.is_some() && app.controller.follow_desktop_theme() {
             app.apply_external(&cc.egui_ctx);
@@ -452,11 +480,13 @@ impl Phoebus {
     }
 
     /// Stop waiting for the scan in flight, if any: its result will never be installed,
-    /// and its thread will not write the snapshot.
+    /// and its thread will not write the snapshot. A rescan queued behind it goes too: it
+    /// was for the old root, and the new root's own scan reads what is there now.
     fn abandon_scan(&mut self) {
         if let Some(scan) = self.scan.take() {
             scan.abandoned.store(true, Ordering::Release);
         }
+        self.rescan_queued = None;
     }
 
     fn poll_scan(&mut self) {
@@ -482,6 +512,11 @@ impl Phoebus {
         match mode {
             ScanMode::Blocking => self.install(library),
             ScanMode::Quiet => self.swap_in(library),
+        }
+        // Only now, with this scan's result on screen and its snapshot saved: the queued
+        // rescan compares against it and saves after it.
+        if let Some(reread) = self.rescan_queued.take() {
+            self.rescan(reread);
         }
     }
 
@@ -543,21 +578,38 @@ impl Phoebus {
         self.vstate.library_refreshed(&old, &self.library);
     }
 
-    /// Settings' `RESCAN`: read every file of the root in force again.
+    /// Scan the root in force again: now, or right after the scan that is already running.
     ///
-    /// Every file, not just the changed ones — this is the way out when an edit kept both
-    /// size and mtime (some taggers can be told to), which the launch rescan cannot see. It
-    /// runs behind the library like the launch rescan; the button says `SCANNING…` until
-    /// it lands. An empty library has nothing to hide behind, so it gets the scanning
-    /// screen.
-    fn rescan(&mut self) {
+    /// Settings' `RESCAN` asks for [`Reread::All`] — every file, not just the changed ones:
+    /// the way out when an edit kept both size and mtime (some taggers can be told to),
+    /// which the launch rescan cannot see. A finished import batch or edit asks for
+    /// [`Reread::Changed`]: the incremental scan of the launch, which picks up the new and
+    /// rewritten files for a `stat` per file elsewhere.
+    ///
+    /// Either way it runs behind the library like the launch rescan, and the result is
+    /// swapped in quietly; the Settings button says `SCANNING…` and the Import view
+    /// `RESCANNING THE LIBRARY…` until it lands. An empty library has nothing to hide
+    /// behind, so it gets the scanning screen — except on the Import view.
+    ///
+    /// A request while a scan runs is not dropped but queued, and [`Phoebus::poll_scan`]
+    /// starts it once that scan's result is in: the songs an import just filed may sit in
+    /// a folder the running scan has already walked past. Requests merge — one queued
+    /// rescan, reading every file if any request asked for that.
+    fn rescan(&mut self, reread: Reread) {
+        if self.scan.is_some() {
+            self.rescan_queued = Some(match self.rescan_queued {
+                Some(queued) => queued.and(reread),
+                None => reread,
+            });
+            return;
+        }
         let mode = if self.library.is_empty() {
             ScanMode::Blocking
         } else {
             ScanMode::Quiet
         };
         let known = self.library.tracks().cloned().collect();
-        self.start_scan(mode, known, false);
+        self.start_scan(mode, known, reread == Reread::Changed);
     }
 
     /// True while the scanning screen is up instead of the content.
@@ -669,7 +721,7 @@ impl Phoebus {
             Action::ToggleShuffle => self.controller.toggle_shuffle(),
             Action::CycleRepeat => self.controller.cycle_repeat(),
             Action::ToggleQueue => self.queue_open = !self.queue_open,
-            Action::Rescan => self.rescan(),
+            Action::Rescan => self.rescan(Reread::All),
             Action::SetLibraryRoot(typed) => self.set_library_root(typed),
             Action::SetThemeMode(mode) => {
                 let accent = theme::p().accent;
@@ -721,6 +773,7 @@ impl Phoebus {
         self.controller.stop();
         self.abandon_scan();
         self.root = root;
+        self.vstate.import.set_root(self.root.clone());
         self.library = Library::empty_with_covers(&self.root, self.dirs.covers_dir());
         // Nothing resolves against an empty library; the scan below resolves them again.
         self.controller.favorites.resolve(&self.library);
@@ -794,6 +847,10 @@ impl Phoebus {
     /// *consumes* the key, which would take this ordering apart from the inside.
     fn escape(&mut self) {
         if self.vstate.playlist.close_picker() {
+            return;
+        }
+        // The import editor is the Settings view's rename: an edit in progress, abandoned.
+        if self.view == View::Settings && self.vstate.import.close_editor() {
             return;
         }
         if self.vstate.playlist.cancel_rename() {
@@ -1161,12 +1218,16 @@ impl Phoebus {
     }
 
     fn content(&mut self, ui: &mut Ui) {
-        if self.scan_blocking() {
+        // Settings stays up through every scan, the blocking one included: its IMPORT
+        // section is what the user watches while a drop is processed, and swapping it for
+        // `SCANNING LIBRARY…` would hide the very rows that just turned `IMPORTED`. The
+        // section says it is rescanning.
+        if self.scan_blocking() && self.view != View::Settings {
             self.scanning_note(ui);
             return;
         }
-        // The Settings view is the way *out* of an empty library, so it must draw even when
-        // there is nothing to show anywhere else.
+        // Settings is the way *out* of an empty library — a new root, or an import — so it
+        // must draw even when there is nothing to show anywhere else.
         if self.library.is_empty() && self.view != View::Settings {
             let root = views::settings::display_path(&self.root);
             views::page(ui, |ui| {
@@ -1178,6 +1239,8 @@ impl Phoebus {
                         "",
                         "EXPECTED LAYOUT: ARTIST / ALBUM / TRACK.M4A",
                         "SUPPORTED: M4A MP3 FLAC OGG WAV AIFF AAC",
+                        "",
+                        "OR DROP SONGS ON THIS WINDOW TO IMPORT THEM",
                     ],
                 );
             });
@@ -1268,6 +1331,23 @@ impl Phoebus {
             theme::p().text_low,
         );
         ui.allocate_space(rect.size());
+    }
+
+    /// Files dropped anywhere on the window are imported, and Settings comes up scrolled to
+    /// its IMPORT section to show them — the Apple Music behaviour, where the whole library
+    /// window is a drop target.
+    fn take_drops(&mut self, ctx: &egui::Context) {
+        let dropped: Vec<PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .collect()
+        });
+        if self.vstate.import.drop_paths(ctx, &dropped) {
+            self.vstate.import.reveal();
+            self.actions.push(Action::Go(View::Settings));
+        }
     }
 
     // ---- screenshots -----------------------------------------------------------------
@@ -1390,6 +1470,13 @@ impl Phoebus {
                 self.view = View::Search;
             }
             Step::Settings => self.view = View::Settings,
+            // Settings again, scrolled to IMPORT, with sample rows (one per status) and the
+            // editor open: what an import session looks like, without importing anything.
+            Step::SettingsImport => {
+                self.vstate.import.seed_demo(&self.library);
+                self.vstate.import.reveal();
+                self.view = View::Settings;
+            }
             Step::Playing => self.tour_playing(),
         }
         if let Some(tour) = &mut self.tour {
@@ -1645,6 +1732,14 @@ impl eframe::App for Phoebus {
         // pause pressed in the background would otherwise sit queued (audibly ignored)
         // until the window next opened. `apply_actions` is a no-op when nothing queued.
         self.media_keys.poll(&self.controller, &mut self.actions);
+        // Finished imports, collected here rather than in `ui` for the same reason: the
+        // worker keeps going while the window is hidden, and the rescan it asks for must
+        // not wait for the window to come back.
+        self.vstate.import.scanning = self.scan.is_some();
+        // Incremental, not Settings' full `RESCAN`: the imported files are new to the scan.
+        if self.vstate.import.poll(ctx) {
+            self.rescan(Reread::Changed);
+        }
         // Widget requests (queue jump, shuffle) are actions on the same terms, and
         // for the same reason: only `logic` runs while the window is hidden.
         self.remote.poll(&mut self.actions);
@@ -1677,6 +1772,7 @@ impl eframe::App for Phoebus {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.controller.shortcuts(&ctx, &mut self.actions);
+        self.take_drops(&ctx);
 
         // FIRST, so it spans the full window width and everything else stacks above it
         // (UI-SPEC §Layout). egui hands each panel what is left of the parent rect, so

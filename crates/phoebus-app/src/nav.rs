@@ -32,7 +32,7 @@ pub enum View {
     Playlist(u64),
     /// Live search results (C2).
     Search,
-    /// Library root + theme settings.
+    /// Library root, importing new songs, and the theme.
     Settings,
 }
 
@@ -73,7 +73,9 @@ impl View {
             "albums" => View::Albums,
             "artists" => View::Artists,
             "songs" => View::Songs,
-            "settings" => View::Settings,
+            // `import` was a page of its own in the first build of the importer, and a
+            // `state.json` it wrote may still say so; importing lives in Settings now.
+            "settings" | "import" => View::Settings,
             _ => View::RecentlyAdded,
         }
     }
@@ -180,7 +182,10 @@ pub enum Action {
     CycleRepeat,
     /// Show / hide the Up Next drawer.
     ToggleQueue,
-    /// Settings: re-run the library scan over the root already in force.
+    /// Settings: re-run the library scan over the root already in force. Also raised by
+    /// the Import view once a batch has landed. Asked for while a scan is running, it
+    /// runs again when that one is done — the files just imported may have arrived after
+    /// the running scan walked past their folder.
     Rescan,
     /// Settings: adopt a library root (as typed, `~` allowed) and rescan. `None` restores
     /// the default `~/.phoebus`. A path that is not a directory is refused, and the view
@@ -363,6 +368,11 @@ mod tests {
             assert_eq!(View::from_state(&v.to_state()), v);
         }
         assert_eq!(View::from_state("nonsense"), View::RecentlyAdded);
+        assert_eq!(
+            View::from_state("import"),
+            View::Settings,
+            "a state.json from the build with an Import page reopens where import lives now"
+        );
         assert_eq!(View::from_state("playlist:xx"), View::RecentlyAdded);
     }
 

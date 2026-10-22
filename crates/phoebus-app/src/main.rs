@@ -34,6 +34,7 @@ mod app;
 mod artwork;
 mod controller;
 mod icon;
+mod importer;
 mod lifecycle;
 mod media_keys;
 mod nav;

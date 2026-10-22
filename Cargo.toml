@@ -43,6 +43,8 @@ souvlaki = "0.8.3"
 log = "0.4"
 env_logger = "0.11"
 dirs = "6"
+# Already in the tree through `dirs-sys`; core uses it for the exclusive rename alone.
+libc = "0.2"
 
 [profile.release]
 opt-level = 3
