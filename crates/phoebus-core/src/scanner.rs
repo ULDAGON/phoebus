@@ -600,11 +600,13 @@ fn cached_covers(dir: &Path) -> HashSet<CoverId> {
 /// Write the covers the cache lacks although no file changed: the tracks were reused from an
 /// earlier scan (so their pictures were never in memory this time), but the PNG is gone —
 /// a cleared cache, or a library snapshot that outlived its cache. Each such picture is
-/// read once more from the first track that carries it.
+/// read once more, from the first song that carries it and still holds it.
 ///
-/// A file whose picture no longer hashes to the id its track remembers was re-tagged without
-/// its size or mtime moving; its PNG is left out (the song paints the placeholder) until a
-/// `RESCAN` reads it again.
+/// "Still holds it" is checked: the picture read must hash to the id. A file re-tagged
+/// without its size or mtime moving, or one that cannot be read, is passed over for the
+/// next song with the same cover, so one bad file does not cost every song that shares
+/// its art. Only when no song yields the picture does the cover stay missing (the songs
+/// paint the placeholder) until a `RESCAN` reads them again.
 fn restore_covers<F: FnMut(ScanProgress)>(
     root: &Path,
     library: &Library,
@@ -615,19 +617,23 @@ fn restore_covers<F: FnMut(ScanProgress)>(
     if cancelled() {
         return;
     }
-    let mut missing: Vec<&Track> = Vec::new();
-    let mut seen: HashSet<CoverId> = HashSet::new();
+    // Each missing cover with every song that carries it, both in Songs order.
+    let mut missing: Vec<(CoverId, Vec<&Track>)> = Vec::new();
+    let mut index: HashMap<CoverId, usize> = HashMap::new();
     for id in library.tracks_sorted() {
         if let Some(track) = library.track(*id)
             && let Some(cover) = track.cover
             && !covers.has(cover)
-            && seen.insert(cover)
         {
-            missing.push(track);
+            let i = *index.entry(cover).or_insert_with(|| {
+                missing.push((cover, Vec::new()));
+                missing.len() - 1
+            });
+            missing[i].1.push(track);
         }
     }
     let total = missing.len();
-    for (i, track) in missing.into_iter().enumerate() {
+    for (i, (cover, carriers)) in missing.into_iter().enumerate() {
         if cancelled() {
             return;
         }
@@ -636,21 +642,33 @@ fn restore_covers<F: FnMut(ScanProgress)>(
             done: i + 1,
             total: Some(total),
             tracks: library.track_count(),
-            current: Some(track.title.clone()),
+            current: carriers.first().map(|t| t.title.clone()),
         });
-        let Some(cover) = track.cover else {
-            continue;
-        };
-        let source = track.abs_path(root);
-        match first_picture(&source) {
-            Some(data) if CoverId::of_picture(&data) == cover => {
-                covers.offer(cover, &data, &source);
+        let restored = carriers.iter().any(|track| {
+            let source = track.abs_path(root);
+            match first_picture(&source) {
+                Some(data) if CoverId::of_picture(&data) == cover => {
+                    covers.offer(cover, &data, &source);
+                    true
+                }
+                Some(_) => {
+                    log::warn!(
+                        "scan: the picture in {} changed without its mtime; RESCAN reads it again",
+                        source.display()
+                    );
+                    false
+                }
+                None => {
+                    log::warn!("scan: no readable picture in {}", source.display());
+                    false
+                }
             }
-            Some(_) => log::warn!(
-                "scan: the picture in {} changed without its mtime; RESCAN reads it again",
-                source.display()
-            ),
-            None => log::warn!("scan: no readable picture in {}", source.display()),
+        });
+        if !restored {
+            log::warn!(
+                "scan: cover {cover} is in none of its {} song(s)",
+                carriers.len()
+            );
         }
     }
 }
@@ -1239,6 +1257,33 @@ mod tests {
             "older than the scan by the margin, and unused"
         );
         assert!(lib.cover_path(cover).exists(), "a used cover always stays");
+    }
+
+    /// The first song carrying a lost cover may no longer yield it (here: damaged in
+    /// place, size and mtime kept, so the rescan reuses its track). The next one does.
+    #[test]
+    fn a_lost_cover_is_restored_from_the_next_song_that_carries_it() {
+        let music = tempfile::tempdir().expect("tempdir");
+        let covers = tempfile::tempdir().expect("tempdir");
+        let root = music.path();
+        let first = root.join("HOME/Odyssey/01 a.wav");
+        write_wav_with_cover(&first, 200, 40);
+        write_wav_with_cover(&root.join("HOME/Odyssey/02 b.wav"), 200, 40);
+        let lib = scan_with_covers(root, covers.path());
+        let cover = only_cover(&lib);
+        fs::remove_file(lib.cover_path(cover)).expect("lose the cover");
+
+        let stamp = fs::metadata(&first).expect("stat");
+        let mtime = stamp.modified().expect("mtime");
+        fs::write(&first, vec![0u8; stamp.len() as usize]).expect("damage in place");
+        set_mtime(&first, mtime);
+
+        let again = rescan_with_covers_progress(root, covers.path(), lib.tracks().cloned(), |_| {});
+        assert_eq!(again.track_count(), 2, "both tracks reused, unread");
+        assert!(
+            again.cover_path(cover).exists(),
+            "restored from the second song"
+        );
     }
 
     /// Only a picture the cache can decode becomes a cover: a GIF first in the tag is passed
