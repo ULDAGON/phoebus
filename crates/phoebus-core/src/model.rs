@@ -5,7 +5,7 @@
 //! `HashMap`/`BTreeMap` lookups, and durations. Nothing here allocates when read, so an
 //! egui app that redraws every frame can call these getters freely.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -24,7 +24,9 @@ pub const UNKNOWN_TITLE: &str = "Untitled";
 ///
 /// Stable across runs and machines, so playlists (which store paths) and any UI state that
 /// remembers a track survive a rescan.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize,
+)]
 pub struct TrackId(pub u64);
 
 impl TrackId {
@@ -88,15 +90,25 @@ impl std::fmt::Display for AlbumKey {
 }
 
 /// One audio file plus its (tag- or path-derived) metadata.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Serializable because the library snapshot ([`crate::snapshot`]) stores tracks as they
+/// are. The two derived fields, [`Track::id`] and [`Track::album_key`], are left out of
+/// that form and recomputed on load with [`Track::refresh_key`]: they are pure functions
+/// of other fields, and storing them would only add bytes to parse and a way for the file
+/// to disagree with itself.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Track {
     /// FNV-1a-64 of [`Track::rel_path`].
+    #[serde(skip)]
     pub id: TrackId,
     /// Library-relative, `/`-separated path (`HOME/Odyssey/01 Intro.m4a`).
     pub rel_path: String,
     /// The real on-disk path, set only when [`Track::rel_path`] is a *lossy* rendering of
     /// it — a file name that is not valid UTF-8, which Linux file systems allow. `None` in
     /// the normal case, where `root` + `rel_path` is exactly the file.
+    ///
+    /// Stored as raw bytes, because such a path is by definition not a string.
+    #[serde(with = "path_bytes")]
     pub source_path: Option<PathBuf>,
     /// Display title.
     pub title: String,
@@ -107,6 +119,7 @@ pub struct Track {
     /// Display album title.
     pub album: String,
     /// Precomputed `AlbumKey` so the UI can look up the album without allocating.
+    #[serde(skip)]
     pub album_key: AlbumKey,
     /// Track number within its disc.
     pub track_no: Option<u32>,
@@ -120,8 +133,14 @@ pub struct Track {
     pub duration: Duration,
     /// Whether the file carries at least one embedded picture.
     pub has_artwork: bool,
-    /// File mtime — drives the Recently Added view.
+    /// File mtime — drives the Recently Added view, and is half of what tells an
+    /// incremental rescan that the file has not changed since it was last read.
+    #[serde(with = "mtime")]
     pub added_at: SystemTime,
+    /// File size in bytes — the other half of that check. A tag edit that keeps the mtime
+    /// (some taggers can) usually still moves the size; one that keeps both is only picked
+    /// up by an explicit `RESCAN`, which reads every file.
+    pub size: u64,
 }
 
 impl Track {
@@ -163,6 +182,7 @@ impl Track {
             duration: Duration::ZERO,
             has_artwork: false,
             added_at: SystemTime::UNIX_EPOCH,
+            size: 0,
         };
         t.refresh_key();
         t
@@ -313,7 +333,7 @@ impl Library {
             for &i in &members {
                 let t = &tracks[i];
                 album.track_ids.push(t.id);
-                album.duration += t.duration;
+                album.duration = album.duration.saturating_add(t.duration);
                 album.has_artwork |= t.has_artwork;
                 if album.year.is_none() {
                     album.year = t.year;
@@ -374,7 +394,7 @@ impl Library {
         });
         let tracks_sorted: Vec<TrackId> = order.iter().map(|&i| tracks[i].id).collect();
 
-        let total_duration = tracks.iter().map(|t| t.duration).sum();
+        let total_duration = sum_durations(tracks.iter().map(|t| t.duration));
         let mut map: HashMap<TrackId, Track> = HashMap::with_capacity(tracks.len());
         for t in tracks {
             if let Some(previous) = map.insert(t.id, t) {
@@ -511,11 +531,67 @@ impl Library {
 
     /// Sum of the durations of a set of tracks (for playlist headers).
     pub fn duration_of(&self, ids: &[TrackId]) -> Duration {
-        ids.iter()
-            .filter_map(|id| self.tracks.get(id))
-            .map(|t| t.duration)
-            .sum()
+        sum_durations(
+            ids.iter()
+                .filter_map(|id| self.tracks.get(id))
+                .map(|t| t.duration),
+        )
     }
+
+    /// Every track, in no particular order — what the snapshot stores, and what a rescan
+    /// hands back to the scanner as already known.
+    pub fn tracks(&self) -> impl Iterator<Item = &Track> {
+        self.tracks.values()
+    }
+
+    /// True when `tracks` — which must not repeat a track — are exactly the tracks of this
+    /// library, field for field. How a finished scan tells that it found nothing new
+    /// compared with what it started from, without building a second library.
+    pub fn holds_exactly(&self, tracks: &[Track]) -> bool {
+        self.tracks.len() == tracks.len()
+            && tracks.iter().all(|t| self.tracks.get(&t.id) == Some(t))
+    }
+
+    /// The albums whose tracks differ between `self` and `newer`.
+    ///
+    /// A track that was added, removed or changed in any field puts its album in the set —
+    /// both albums, when a re-tag moved it from one to another. The set is empty exactly
+    /// when the two libraries hold the same tracks, which is how the app tells a background
+    /// rescan that found nothing from one it has to show, and which covers it has to reload
+    /// when it does. One hash lookup and one comparison per track: far cheaper than the
+    /// stat per file the rescan itself costs.
+    pub fn changed_albums(&self, newer: &Library) -> BTreeSet<AlbumKey> {
+        let mut changed = BTreeSet::new();
+        for (id, track) in &newer.tracks {
+            match self.tracks.get(id) {
+                Some(old) if old == track => {}
+                Some(old) => {
+                    changed.insert(old.album_key.clone());
+                    changed.insert(track.album_key.clone());
+                }
+                None => {
+                    changed.insert(track.album_key.clone());
+                }
+            }
+        }
+        for (id, track) in &self.tracks {
+            if !newer.tracks.contains_key(id) {
+                changed.insert(track.album_key.clone());
+            }
+        }
+        changed
+    }
+}
+
+/// Sum of `durations`, clamped at [`Duration::MAX`] instead of overflowing.
+///
+/// A duration is data read from a file or from a snapshot, so no sum of them may panic
+/// (`Duration`'s own `+` and `sum` do, past `u64::MAX` seconds): a damaged `library.json`
+/// must cost a rescan, never every launch.
+pub fn sum_durations(durations: impl IntoIterator<Item = Duration>) -> Duration {
+    durations
+        .into_iter()
+        .fold(Duration::ZERO, Duration::saturating_add)
 }
 
 /// Disc → track → title → path ordering, used inside albums and as a tiebreak elsewhere.
@@ -561,6 +637,98 @@ pub fn split_track_prefix(stem: &str) -> (Option<u32>, &str) {
         return (None, stem);
     }
     (stem[..digits].parse::<u32>().ok(), trimmed.trim_end())
+}
+
+/// `Option<PathBuf>` as raw bytes, for [`Track::source_path`].
+///
+/// That field is only ever set for a path that is *not* valid UTF-8, which serde's own
+/// `PathBuf` impl refuses to write — one such file would sink the whole snapshot. On Unix a
+/// path is bytes, so bytes are what round-trip it exactly.
+mod path_bytes {
+    use std::path::PathBuf;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(path: &Option<PathBuf>, s: S) -> Result<S::Ok, S::Error> {
+        path.as_deref().map(to_bytes).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<PathBuf>, D::Error> {
+        Ok(Option::<Vec<u8>>::deserialize(d)?.map(from_bytes))
+    }
+
+    #[cfg(unix)]
+    fn to_bytes(path: &std::path::Path) -> Vec<u8> {
+        use std::os::unix::ffi::OsStrExt;
+        path.as_os_str().as_bytes().to_vec()
+    }
+
+    #[cfg(unix)]
+    fn from_bytes(bytes: Vec<u8>) -> PathBuf {
+        use std::os::unix::ffi::OsStringExt;
+        PathBuf::from(std::ffi::OsString::from_vec(bytes))
+    }
+
+    // Phoebus ships on macOS and Linux only; elsewhere the lossy form at least compiles.
+    #[cfg(not(unix))]
+    fn to_bytes(path: &std::path::Path) -> Vec<u8> {
+        path.to_string_lossy().into_owned().into_bytes()
+    }
+
+    #[cfg(not(unix))]
+    fn from_bytes(bytes: Vec<u8>) -> PathBuf {
+        PathBuf::from(String::from_utf8_lossy(&bytes).into_owned())
+    }
+}
+
+/// `SystemTime` as `[seconds, nanoseconds]` since the Unix epoch, for [`Track::added_at`].
+///
+/// Exact to the nanosecond, because an incremental rescan compares it for equality with
+/// the file's mtime. The seconds are signed: serde's own impl refuses a time before 1970,
+/// and one file restored with a zeroed or negative mtime would otherwise sink the whole
+/// snapshot.
+mod mtime {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    const NANOS: u32 = 1_000_000_000;
+
+    pub fn serialize<S: Serializer>(at: &SystemTime, s: S) -> Result<S::Ok, S::Error> {
+        let (secs, nanos) = match at.duration_since(UNIX_EPOCH) {
+            Ok(after) => (
+                i64::try_from(after.as_secs()).unwrap_or(i64::MAX),
+                after.subsec_nanos(),
+            ),
+            Err(e) => {
+                // `before` ahead of the epoch, written as a negative second plus a forward
+                // fraction, so `nanos` is always in 0..1e9 whichever side it is on.
+                let before = e.duration();
+                let secs = i64::try_from(before.as_secs()).unwrap_or(i64::MAX);
+                match before.subsec_nanos() {
+                    0 => (-secs, 0),
+                    n => (-secs - 1, NANOS - n),
+                }
+            }
+        };
+        (secs, nanos).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<SystemTime, D::Error> {
+        let (secs, nanos) = <(i64, u32)>::deserialize(d)?;
+        if nanos >= NANOS {
+            return Err(D::Error::custom("mtime nanoseconds out of range"));
+        }
+        let whole = Duration::from_secs(secs.unsigned_abs());
+        let base = if secs >= 0 {
+            UNIX_EPOCH.checked_add(whole)
+        } else {
+            UNIX_EPOCH.checked_sub(whole)
+        };
+        base.and_then(|t| t.checked_add(Duration::from_nanos(u64::from(nanos))))
+            .ok_or_else(|| D::Error::custom("mtime out of range"))
+    }
 }
 
 #[cfg(test)]
@@ -819,6 +987,105 @@ mod tests {
         assert_eq!(
             Library::empty("/music").covers_dir(),
             PathBuf::from("/music/.phoebus/cache/covers")
+        );
+    }
+
+    /// The snapshot form of a track: every stored field survives exactly, the derived ones
+    /// are recomputed, and the two fields serde cannot write on its own — a pre-1970 mtime
+    /// and a path that is not a string — still round-trip.
+    #[test]
+    fn a_track_round_trips_through_json() {
+        let mut tr = t("HOME/Odyssey/01 Intro.m4a", 241, 0);
+        tr.duration = Duration::new(241, 123_456_789);
+        tr.added_at = SystemTime::UNIX_EPOCH + Duration::new(1_700_000_000, 987_654_321);
+        tr.size = 8_123_456;
+        tr.genre = Some("Synthwave".to_string());
+        tr.has_artwork = true;
+        tr.source_path = Some(PathBuf::from("/lib/real name/01 Intro.m4a"));
+
+        let json = serde_json::to_string(&tr).expect("serialize");
+        assert!(
+            !json.contains("album_key"),
+            "derived fields stay out: {json}"
+        );
+        let mut back: Track = serde_json::from_str(&json).expect("deserialize");
+        back.refresh_key();
+        assert_eq!(back, tr);
+
+        for before in [Duration::new(5, 0), Duration::new(5, 250_000_000)] {
+            tr.added_at = SystemTime::UNIX_EPOCH - before;
+            let json = serde_json::to_string(&tr).expect("pre-epoch serializes");
+            let mut back: Track = serde_json::from_str(&json).expect("deserialize");
+            back.refresh_key();
+            assert_eq!(back.added_at, tr.added_at, "{before:?} before the epoch");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_lossy_source_path_round_trips_as_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let mut tr = Track::new("Bj\u{fffd}rk/Post/01 Army.wav");
+        let real = PathBuf::from(std::ffi::OsStr::from_bytes(
+            b"/lib/Bj\xf6rk/Post/01 Army.wav",
+        ));
+        tr.source_path = Some(real.clone());
+        let json = serde_json::to_string(&tr).expect("a non-UTF-8 path must not fail the save");
+        let back: Track = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.source_path, Some(real));
+    }
+
+    /// Durations come from files and snapshots, so summing them must clamp, not panic.
+    #[test]
+    fn huge_durations_saturate_instead_of_overflowing() {
+        let mut a = t("A/One/01 x.mp3", 0, 1);
+        a.duration = Duration::MAX;
+        let mut b = t("A/One/02 y.mp3", 0, 1);
+        b.duration = Duration::from_secs(60);
+        let ids = [a.id, b.id];
+        let lib = Library::build("/lib", vec![a, b]);
+        assert_eq!(lib.total_duration(), Duration::MAX);
+        assert_eq!(lib.duration_of(&ids), Duration::MAX);
+        let album = lib.album(&AlbumKey::new("A", "One")).expect("album");
+        assert_eq!(album.duration, Duration::MAX);
+    }
+
+    #[test]
+    fn changed_albums_names_exactly_the_albums_that_moved() {
+        let old = Library::build(
+            "/lib",
+            vec![
+                t("A/One/01 x.mp3", 10, 1),
+                t("A/One/02 y.mp3", 10, 1),
+                t("B/Two/01 z.mp3", 10, 1),
+                t("C/Gone/01 w.mp3", 10, 1),
+            ],
+        );
+        assert!(
+            old.changed_albums(&old.clone()).is_empty(),
+            "same tracks, nothing changed"
+        );
+
+        let mut retagged = t("A/One/02 y.mp3", 10, 2); // newer mtime
+        retagged.title = "Why".to_string();
+        let newer = Library::build(
+            "/lib",
+            vec![
+                t("A/One/01 x.mp3", 10, 1),
+                retagged,
+                t("B/Two/01 z.mp3", 10, 1),
+                t("D/New/01 v.mp3", 10, 1),
+            ],
+        );
+        let changed: Vec<AlbumKey> = old.changed_albums(&newer).into_iter().collect();
+        assert_eq!(
+            changed,
+            vec![
+                AlbumKey::new("A", "One"),
+                AlbumKey::new("C", "Gone"),
+                AlbumKey::new("D", "New"),
+            ],
+            "a changed, a removed and an added album; the untouched one is not named"
         );
     }
 }

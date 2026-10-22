@@ -28,6 +28,10 @@
 //! never configures a root — existing `state.json`, `playlists.json` and `cache/covers/` keep
 //! working with no migration step at all.
 //!
+//! `library.json` in the data dir is a [`snapshot`] of the last finished scan: the app builds
+//! its first library from it and rescans in the background, so a launch never waits for the
+//! tags of thousands of files.
+//!
 //! The old root-relative path API is gone. `Dirs` is the only thing that knows the layout;
 //! [`Dirs::inside`](paths::Dirs::inside) is the single remaining way to say "the data dir that
 //! belongs to this root", and it is what the self-contained [`scan`] / [`Library::build`] pair
@@ -41,6 +45,7 @@ pub mod playlists;
 pub mod queue;
 pub mod scanner;
 pub mod search;
+pub mod snapshot;
 pub mod state;
 
 pub use color::{format_hex_color, parse_hex_color};
@@ -55,8 +60,9 @@ pub use paths::{
 pub use playlists::{Playlist, PlaylistStore};
 pub use queue::{AdvanceReason, PlayQueue, Repeat, UpNext};
 pub use scanner::{
-    AUDIO_EXTENSIONS, COVER_MAX_EDGE, ScanPhase, ScanProgress, scan, scan_with_covers,
-    scan_with_covers_progress, scan_with_progress,
+    AUDIO_EXTENSIONS, COVER_MAX_EDGE, ScanPhase, ScanProgress, rescan_cancellable,
+    rescan_with_covers_progress, scan, scan_with_covers, scan_with_covers_progress,
+    scan_with_progress,
 };
 pub use search::{SECTION_CAP, SearchResults, filter_tracks, search, search_capped};
 pub use state::{

@@ -16,6 +16,7 @@ pub mod settings;
 pub mod songs;
 
 use egui::{Align2, Margin, Ui};
+use phoebus_core::Library;
 
 use crate::nav::{Ctx, View};
 use crate::theme;
@@ -68,6 +69,30 @@ impl ViewState {
         self.songs.invalidate();
         self.search.invalidate();
         self.playlist.invalidate();
+    }
+
+    /// A background rescan replaced `old` with `new` under the view the user is looking at.
+    ///
+    /// Every cache goes, exactly as in [`ViewState::library_changed`] — sort orders, search
+    /// hits and resolved rows all point into the old library. What the user *chose* stays:
+    /// the selected artist (followed by name, since its index can move when another artist
+    /// arrives or leaves), the selected song rows, the sort column, the split width. Track
+    /// ids survive a rescan by construction, so a selection held as one is still right.
+    pub fn library_refreshed(&mut self, old: &Library, new: &Library) {
+        let artist = self
+            .artists
+            .selected
+            .and_then(|i| old.artists().get(i))
+            .and_then(|a| new.artists().iter().position(|b| b.sort_key == a.sort_key));
+        // An artist that left the library keeps its old index, which the view clamps.
+        if artist.is_some() {
+            self.artists.selected = artist;
+        }
+        self.albums.invalidate();
+        self.favorites.library_refreshed();
+        self.songs.invalidate();
+        self.search.invalidate();
+        self.playlist.library_refreshed();
     }
 }
 
@@ -283,6 +308,7 @@ mod tests {
             configured: None,
             desktop_theme: false,
             follow_desktop: true,
+            scanning: false,
         }
     }
 
@@ -559,6 +585,13 @@ mod tests {
             ..themed
         };
         render_with(&View::Settings, "", &mut st, &lib, &[], &stock, &favs);
+
+        // A rescan behind the library swaps `RESCAN` for a dead `SCANNING…`.
+        let scanning = settings::Info {
+            scanning: true,
+            ..plain_info()
+        };
+        render_with(&View::Settings, "", &mut st, &lib, &[], &scanning, &favs);
     }
 
     /// UI-SPEC §Favorites, on the real widget tree: the view lays out populated as well as
@@ -740,6 +773,34 @@ mod tests {
         st.library_changed();
         assert_eq!(st.artists.list_w, theme::ARTIST_LIST_W.min);
         assert_eq!(st.artists.selected, Some(0));
+    }
+
+    /// A background rescan keeps what the user picked: the artist follows its name to its
+    /// new index when another artist arrives ahead of it, and the split keeps its width.
+    #[test]
+    fn a_background_rescan_keeps_the_selected_artist_by_name() {
+        let old = library();
+        let mut st = ViewState::default();
+        st.artists.list_w = theme::ARTIST_LIST_W.max;
+        let woodkid = old
+            .artists()
+            .iter()
+            .position(|a| a.name == "Woodkid")
+            .expect("artist");
+        st.artists.selected = Some(woodkid);
+
+        let mut tracks: Vec<Track> = old.tracks().cloned().collect();
+        tracks.push(make("ABBA/Gold/01 SOS.m4a", "SOS", "ABBA", "Gold", 200));
+        let new = Library::build("/lib", tracks);
+        st.library_refreshed(&old, &new);
+        assert_eq!(
+            st.artists.selected,
+            new.artists().iter().position(|a| a.name == "Woodkid"),
+            "the selection follows the artist, not the index"
+        );
+        assert_ne!(st.artists.selected, Some(woodkid), "ABBA sorts ahead of it");
+        assert_eq!(st.artists.list_w, theme::ARTIST_LIST_W.max);
+        render(&View::Artists, "", &mut st, &new, &[]);
     }
 
     /// Press at `from_x`, drag to `to_x`, release — five headless passes, because the

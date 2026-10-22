@@ -6,8 +6,9 @@
 //!   reads. It is configurable (`$PHOEBUS_LIBRARY` > `library_root` in `state.json` >
 //!   `~/.phoebus`) and may be someone's Apple Music folder;
 //! * the **data dir** ([`Dirs`]) — the fixed `~/.phoebus/.phoebus/`, overridable with
-//!   `$PHOEBUS_DATA`, holding `state.json`, `playlists.json`, `favorites.json` and
-//!   `cache/covers/`. Phoebus never writes inside a configured library root.
+//!   `$PHOEBUS_DATA`, holding `state.json`, `playlists.json`, `favorites.json`,
+//!   `library.json` (the scan snapshot) and `cache/covers/`. Phoebus never writes inside a
+//!   configured library root.
 //!
 //! The default library root is `~/.phoebus` and its `.phoebus` subdirectory is exactly the
 //! default data dir, so an install that never configures a root keeps the old layout
@@ -120,6 +121,12 @@ impl Dirs {
     /// `<data>/favorites.json`
     pub fn favorites_path(&self) -> PathBuf {
         self.data.join("favorites.json")
+    }
+
+    /// `<data>/library.json` — the tracks of the last finished scan, which is what lets
+    /// the next launch show the library at once ([`crate::snapshot`]).
+    pub fn library_path(&self) -> PathBuf {
+        self.data.join("library.json")
     }
 
     /// `<data>/cache/covers` — one PNG per album, named by [`fnv1a_64`] of the album key.

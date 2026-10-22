@@ -5,12 +5,15 @@
 //! [`Phoebus::logic`], all painting in [`Phoebus::ui`] (API-FACTS §3.1).
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::Receiver;
 use egui::{Align2, Color32, Rect, Sense, Ui, Vec2};
 use phoebus_core::{
-    AppState, Dirs, Library, Playlist, PlaylistStore, ScanPhase, ScanProgress, TrackId, scanner,
+    AppState, Dirs, Library, Playlist, PlaylistStore, ScanPhase, ScanProgress, Track, TrackId,
+    scanner, snapshot,
 };
 
 use crate::artwork::Artwork;
@@ -37,10 +40,32 @@ enum ScanMsg {
     Done(Box<Library>),
 }
 
+/// How long a `library.json.*.tmp` must lie untouched before startup deletes it. A save
+/// takes seconds at most.
+const STALE_TEMP_AGE: Duration = Duration::from_secs(300);
+
+/// How a scan shows itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScanMode {
+    /// There is nothing to show until it ends — first launch, a new root: the scanning
+    /// screen covers the content, and the result replaces everything.
+    Blocking,
+    /// A library is already on screen (from the snapshot, or the last scan): the scan runs
+    /// behind it, and its result is swapped in without moving the user
+    /// ([`Phoebus::swap_in`]).
+    Quiet,
+}
+
 /// A scan in flight.
 struct Scan {
     rx: Receiver<ScanMsg>,
     progress: ScanProgress,
+    mode: ScanMode,
+    /// Set when the app stops waiting for this scan (the root changed under it). The scan
+    /// sees it between files and between albums and stops, in particular before it touches
+    /// the shared cover cache again, and its thread then leaves the snapshot alone — so a
+    /// scan of the old root cannot overwrite what the new root's scan keeps there.
+    abandoned: Arc<AtomicBool>,
 }
 
 /// One step of history. The query travels with the view because a `View::Search` restored
@@ -54,8 +79,9 @@ struct Back {
 
 /// The whole application.
 pub struct Phoebus {
-    /// Where Phoebus writes: `state.json`, `playlists.json`, `cache/covers/`. Fixed for the
-    /// run — changing the library root in Settings does not move it.
+    /// Where Phoebus writes: `state.json`, `playlists.json`, `library.json`,
+    /// `cache/covers/`. Fixed for the run — changing the library root in Settings does not
+    /// move it.
     dirs: Dirs,
     /// The music being scanned. Read-only, and swappable from the Settings view.
     root: PathBuf,
@@ -106,16 +132,23 @@ pub struct Phoebus {
     frame_min: Option<Duration>,
     /// When the last frame-loop pass began, which is what [`frame_delay`] measures from.
     last_pass: Instant,
+    /// When `main` started, until the first library is on screen: that moment is logged
+    /// once, as the launch time the snapshot exists to keep short.
+    launched: Option<Instant>,
 }
 
 impl Phoebus {
-    /// Build the app: install the theme, wire the controller, start the first scan.
+    /// Build the app: install the theme, wire the controller, show the snapshot of the
+    /// library if there is one, and start the first scan.
+    ///
+    /// `launched` is when `main` started, for the launch-time log line.
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         dirs: Dirs,
         root: PathBuf,
         state: AppState,
         capture: Option<Capture>,
+        launched: Instant,
     ) -> Phoebus {
         // `PHOEBUS_THEME` if it is set, else what `state.json` remembers. Read before the
         // state is handed to the controller, and applied below through the same setter the
@@ -172,6 +205,7 @@ impl Phoebus {
             // frames late.
             frame_min: crate::wayland_session().then(|| Duration::from_millis(theme::FRAME_MIN_MS)),
             last_pass: Instant::now(),
+            launched: Some(launched),
         };
         // The two top-level panels read their persisted width off the controller every
         // frame; the Artists split is drawn by a view, which never sees the controller, so
@@ -184,7 +218,15 @@ impl Phoebus {
         } else {
             app.set_theme(&cc.egui_ctx, mode, accent);
         }
-        app.start_scan();
+        // Temp files of saves that a crash cut short; untouched for this long, they are not
+        // another window's save in flight.
+        if let Some(data) = app.dirs.library_path().parent() {
+            let gone = snapshot::remove_stale_temp_files(data, STALE_TEMP_AGE);
+            if gone > 0 {
+                log::info!("snapshot: removed {gone} stale temp file(s)");
+            }
+        }
+        app.open_library();
         app
     }
 
@@ -297,7 +339,49 @@ impl Phoebus {
 
     // ---- library scan ----------------------------------------------------------------
 
-    fn start_scan(&mut self) {
+    /// Show the library of [`Phoebus::root`] as fast as possible, then make sure it is
+    /// current.
+    ///
+    /// With a usable snapshot ([`snapshot::load`]: this root, this format) the library is on
+    /// screen before the first frame and a quiet scan checks it behind the user's back —
+    /// reusing every snapshot track whose file has not changed, so it costs a `stat` per
+    /// file instead of a tag read. Without one (first launch, a new root, a damaged file, one
+    /// that holds no tracks) it is the old way: the scanning screen, and a full scan.
+    ///
+    /// Loading on the UI thread is deliberate. It is one file read and one JSON parse —
+    /// tens of milliseconds for thousands of tracks — and a library that arrived a frame
+    /// later over a channel would have to pass through a scanning screen, which is exactly
+    /// what the snapshot is there to avoid.
+    fn open_library(&mut self) {
+        let started = Instant::now();
+        match snapshot::load(
+            &self.dirs.library_path(),
+            &self.root,
+            &self.dirs.covers_dir(),
+        ) {
+            Some(library) => {
+                log::info!(
+                    "library: {} tracks from the snapshot in {} ms",
+                    library.track_count(),
+                    started.elapsed().as_millis()
+                );
+                let known: Vec<Track> = library.tracks().cloned().collect();
+                self.install(library);
+                self.start_scan(ScanMode::Quiet, known, true);
+            }
+            None => self.start_scan(ScanMode::Blocking, Vec::new(), true),
+        }
+    }
+
+    /// Start a scan of [`Phoebus::root`], unless one is already running.
+    ///
+    /// `known` is the tracks already in hand — the snapshot's, or the library on screen. With
+    /// `reuse` the scan takes over those whose file size and mtime are unchanged
+    /// ([`scanner::rescan_with_covers_progress`]); without it every file is read. Either way
+    /// `known` is what the result is compared with: the thread saves the result as the next
+    /// launch's snapshot before handing it over — off the UI thread, only if the app still
+    /// wants it, only if it differs ([`snapshot::save_scan`]).
+    fn start_scan(&mut self, mode: ScanMode, known: Vec<Track>, reuse: bool) {
         if self.scan.is_some() {
             return;
         }
@@ -305,18 +389,47 @@ impl Phoebus {
         // Covers land in the app-data dir, never inside the library root — that is what
         // makes pointing Phoebus at someone's Apple Music folder a read-only operation.
         let covers = self.dirs.covers_dir();
+        let snapshot_path = self.dirs.library_path();
+        let abandoned = Arc::new(AtomicBool::new(false));
+        let thread_abandoned = Arc::clone(&abandoned);
         let (tx, rx) = crossbeam_channel::unbounded::<ScanMsg>();
         let progress_tx = tx.clone();
         let spawned = std::thread::Builder::new()
             .name("phoebus-scan".to_string())
             .spawn(move || {
-                let library = scanner::scan_with_covers_progress(&root, &covers, |p| {
-                    // Drop `current` here rather than shipping a heap-allocated path per
-                    // audio file down an unbounded channel: the scanning screen shows the
-                    // phase and the counts, and nothing in the crate reads the name.
-                    let _ =
-                        progress_tx.send(ScanMsg::Progress(ScanProgress { current: None, ..p }));
-                });
+                let started = Instant::now();
+                // What the result is compared with before it is saved.
+                let previous = known.clone();
+                let seed = if reuse { known } else { Vec::new() };
+                let library = scanner::rescan_cancellable(
+                    &root,
+                    &covers,
+                    seed,
+                    || thread_abandoned.load(Ordering::Acquire),
+                    |p| {
+                        // Drop `current` here rather than shipping a heap-allocated path
+                        // per audio file down an unbounded channel: the scanning screen
+                        // shows the phase and the counts, and nothing in the crate reads
+                        // the name.
+                        let _ = progress_tx
+                            .send(ScanMsg::Progress(ScanProgress { current: None, ..p }));
+                    },
+                );
+                log::info!(
+                    "scan: {} finished in {} ms",
+                    root.display(),
+                    started.elapsed().as_millis()
+                );
+                let wanted_no_more = || thread_abandoned.load(Ordering::Acquire);
+                if !wanted_no_more() {
+                    match snapshot::save_scan(&snapshot_path, &previous, &library, wanted_no_more) {
+                        Ok(snapshot::Saved::Written) => log::info!("snapshot: saved"),
+                        Ok(saved) => log::info!("snapshot: not rewritten ({saved:?})"),
+                        Err(e) => {
+                            log::warn!("snapshot: not saved, the next launch scans again: {e:#}");
+                        }
+                    }
+                }
                 let _ = tx.send(ScanMsg::Done(Box::new(library)));
             });
         match spawned {
@@ -330,9 +443,19 @@ impl Phoebus {
                         tracks: 0,
                         current: None,
                     },
+                    mode,
+                    abandoned,
                 });
             }
             Err(e) => log::error!("scan: could not spawn the scanner thread: {e}"),
+        }
+    }
+
+    /// Stop waiting for the scan in flight, if any: its result will never be installed,
+    /// and its thread will not write the snapshot.
+    fn abandon_scan(&mut self) {
+        if let Some(scan) = self.scan.take() {
+            scan.abandoned.store(true, Ordering::Release);
         }
     }
 
@@ -342,33 +465,108 @@ impl Phoebus {
             for msg in scan.rx.try_iter() {
                 match msg {
                     ScanMsg::Progress(p) => scan.progress = p,
-                    ScanMsg::Done(library) => finished = Some(*library),
+                    ScanMsg::Done(library) => finished = Some((*library, scan.mode)),
                 }
             }
         }
-        if let Some(library) = finished {
-            log::info!(
-                "scan: {} tracks, {} albums, {} artists",
-                library.track_count(),
-                library.album_count(),
-                library.artist_count()
-            );
-            self.artwork.reset(library.covers_dir());
-            self.fmt = Fmt::build(&library);
-            if !self.view.is_valid(&library) {
-                self.view = View::RecentlyAdded;
-            }
-            self.library = library;
-            self.scan = None;
-            // The hearted paths are the durable truth; their ids have to be re-derived
-            // against the library that just arrived, exactly as playlist entries are.
-            self.controller.favorites.resolve(&self.library);
-            // Sort orders, search hits, artist indices and both favourites caches all
-            // referred to the old library.
-            self.vstate.library_changed();
+        let Some((library, mode)) = finished else {
+            return;
+        };
+        log::info!(
+            "scan: {} tracks, {} albums, {} artists",
+            library.track_count(),
+            library.album_count(),
+            library.artist_count()
+        );
+        self.scan = None;
+        match mode {
+            ScanMode::Blocking => self.install(library),
+            ScanMode::Quiet => self.swap_in(library),
         }
     }
 
+    /// Make `library` the one on screen, replacing whatever was there wholesale: every
+    /// cover texture and every view cache goes. For the first library of a root — from the
+    /// snapshot, or from a blocking scan.
+    fn install(&mut self, library: Library) {
+        self.artwork.reset(library.covers_dir());
+        self.fmt = Fmt::build(&library);
+        if !self.view.is_valid(&library) {
+            self.view = View::RecentlyAdded;
+        }
+        self.library = library;
+        // The hearted paths are the durable truth; their ids have to be re-derived
+        // against the library that just arrived, exactly as playlist entries are.
+        self.controller.favorites.resolve(&self.library);
+        // Sort orders, search hits, artist indices and both favourites caches all
+        // referred to the old library.
+        self.vstate.library_changed();
+        if let Some(launched) = self.launched.take() {
+            log::info!(
+                "library: on screen {} ms after launch",
+                launched.elapsed().as_millis()
+            );
+        }
+    }
+
+    /// Swap in the result of a quiet scan without the user noticing more than the change.
+    ///
+    /// A scan that found nothing new — the usual launch — changes nothing at all: not a
+    /// texture, not a cache, not a selection. Otherwise the library is replaced and the
+    /// derived caches rebuilt, but the view, its scroll offset (egui keeps it by widget id),
+    /// the selections ([`ViewState::library_refreshed`]), and playback and the queue (which
+    /// hold track ids, stable across scans) all stay; only the covers of albums that
+    /// actually changed are reloaded ([`Artwork::refresh`]). The one thing that does move
+    /// the user is the page they are on disappearing: an album that is no longer in the
+    /// library sends them to Recently Added, as a blocking scan would.
+    fn swap_in(&mut self, library: Library) {
+        let changed = self.library.changed_albums(&library);
+        // Even an unchanged library can come with covers that were missing a moment ago (a
+        // cleared cache, refilled by the scan): placeholders get another look either way.
+        self.artwork.refresh(&changed);
+        if changed.is_empty() {
+            log::info!("scan: the library on screen is current");
+            return;
+        }
+        log::info!(
+            "scan: {} albums changed; swapping the library in",
+            changed.len()
+        );
+        self.fmt = Fmt::build(&library);
+        if !self.view.is_valid(&library) {
+            self.view = View::RecentlyAdded;
+        }
+        let old = std::mem::replace(&mut self.library, library);
+        self.controller.favorites.resolve(&self.library);
+        self.vstate.library_refreshed(&old, &self.library);
+    }
+
+    /// Settings' `RESCAN`: read every file of the root in force again.
+    ///
+    /// Every file, not just the changed ones — this is the way out when an edit kept both
+    /// size and mtime (some taggers can be told to), which the launch rescan cannot see. It
+    /// runs behind the library like the launch rescan; the button says `SCANNING…` until
+    /// it lands. An empty library has nothing to hide behind, so it gets the scanning
+    /// screen.
+    fn rescan(&mut self) {
+        let mode = if self.library.is_empty() {
+            ScanMode::Blocking
+        } else {
+            ScanMode::Quiet
+        };
+        let known = self.library.tracks().cloned().collect();
+        self.start_scan(mode, known, false);
+    }
+
+    /// True while the scanning screen is up instead of the content.
+    fn scan_blocking(&self) -> bool {
+        self.scan
+            .as_ref()
+            .is_some_and(|scan| scan.mode == ScanMode::Blocking)
+    }
+
+    /// Nothing is scanning, behind the content or in front of it. The screenshot runs wait
+    /// for this, so a frame is never captured just before a quiet swap changes it.
     fn library_ready(&self) -> bool {
         self.scan.is_none()
     }
@@ -469,7 +667,7 @@ impl Phoebus {
             Action::ToggleShuffle => self.controller.toggle_shuffle(),
             Action::CycleRepeat => self.controller.cycle_repeat(),
             Action::ToggleQueue => self.queue_open = !self.queue_open,
-            Action::Rescan => self.start_scan(),
+            Action::Rescan => self.rescan(),
             Action::SetLibraryRoot(typed) => self.set_library_root(typed),
             Action::SetThemeMode(mode) => {
                 let accent = theme::p().accent;
@@ -497,8 +695,10 @@ impl Phoebus {
     /// `typed` is what the user wrote (`None` = the default root). A path that is not a
     /// directory changes nothing and leaves `NOT A DIRECTORY` under the input — the setting
     /// is only written once it is known to be usable. Otherwise: persist, stop playback (the
-    /// loaded track is about to leave the library), forget every cover texture, and rescan.
-    /// The data directory does not move, so `playlists.json` and the cover cache stay put.
+    /// loaded track is about to leave the library), forget every cover texture, abandon a
+    /// scan of the old root that may still be running, and open the new root — from the
+    /// snapshot if it happens to be of that root, else with the scanning screen. The data
+    /// directory does not move, so `playlists.json` and the cover cache stay put.
     fn set_library_root(&mut self, typed: Option<String>) {
         let candidate = views::settings::resolve_typed(typed.as_deref());
         if !candidate.is_dir() {
@@ -517,6 +717,7 @@ impl Phoebus {
         log::info!("settings: library root -> {}", root.display());
 
         self.controller.stop();
+        self.abandon_scan();
         self.root = root;
         self.library = Library::empty_with_covers(&self.root, self.dirs.covers_dir());
         // Nothing resolves against an empty library; the scan below resolves them again.
@@ -526,7 +727,7 @@ impl Phoebus {
         self.vstate.library_changed();
         self.vstate.settings.reset_input();
         self.back_stack.clear();
-        self.start_scan();
+        self.open_library();
     }
 
     fn navigate(&mut self, view: View) {
@@ -958,7 +1159,7 @@ impl Phoebus {
     }
 
     fn content(&mut self, ui: &mut Ui) {
-        if self.scan.is_some() {
+        if self.scan_blocking() {
             self.scanning_note(ui);
             return;
         }
@@ -988,6 +1189,7 @@ impl Phoebus {
             .map(str::to_string);
         let desktop_theme = self.external.is_some();
         let follow_desktop = self.controller.follow_desktop_theme();
+        let scanning = self.scan.is_some();
         let Phoebus {
             library,
             artwork,
@@ -1011,6 +1213,7 @@ impl Phoebus {
             configured: configured.as_deref(),
             desktop_theme,
             follow_desktop,
+            scanning,
         };
         let now = controller.now();
         let playlists: &[Playlist] = if demo.is_some() {

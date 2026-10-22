@@ -55,7 +55,12 @@ fallbacks — an untagged `Artist/Album/01 Title.mp3` still lands in the right p
 
 Point it anywhere in **Settings** (sidebar, bottom) — including straight at
 `~/Music/Music/Media.localized/Music`. Phoebus only ever *reads* the library root: app data
-(state, playlists, cover cache) lives in `~/.phoebus/.phoebus/`, never in your music.
+(state, playlists, cover cache, library snapshot) lives in `~/.phoebus/.phoebus/`, never in
+your music.
+
+Launch is instant after the first scan: each scan saves the library to `library.json` in the
+app-data dir, and the next launch shows it at once while a background scan reads only the
+files whose size or modification time changed. **RESCAN** in Settings reads every file again.
 
 ## Omarchy
 
@@ -120,7 +125,7 @@ closes the queue drawer / leaves search. (`Ctrl` on Linux.)
 | variable | effect |
 |----------|--------|
 | `PHOEBUS_LIBRARY` | library root for this run; outranks the Settings value (which is then disabled) |
-| `PHOEBUS_DATA` | app-data dir; default `~/.phoebus/.phoebus` |
+| `PHOEBUS_DATA` | app-data dir (`state.json`, `playlists.json`, `favorites.json`, `library.json`, `cache/covers/`); default `~/.phoebus/.phoebus` |
 | `PHOEBUS_THEME` | `dark` / `light` / `light,#2EF0FF` — palette for one run, never saved |
 | `PHOEBUS_START_MUTED` | `1` starts at volume 0 without persisting it |
 | `PHOEBUS_SELFTEST_EXPECT` | `"albums,artists,tracks"` minimums for `--selftest` |
@@ -128,11 +133,12 @@ closes the queue drawer / leaves search. (`Ctrl` on Linux.)
 ## Verification
 
 ```
-./target/release/phoebus --selftest    # headless: scan, tags, decode, seek, persistence
+./target/release/phoebus --selftest    # headless: scan, tags, snapshot, decode, seek, persistence
 ./target/release/phoebus --shot DIR    # screenshot tour of every view into DIR
 ```
 
-`--selftest` requires at least one album by default. Setting `PHOEBUS_DATA` and
+`--selftest` requires at least one album by default. Its `snapshot.*` lines time the launch
+path: loading the snapshot and the incremental rescan, against the full scan. Setting `PHOEBUS_DATA` and
 `PHOEBUS_LIBRARY` to temporary directories together keeps a whole verification run off your
 real home.
 

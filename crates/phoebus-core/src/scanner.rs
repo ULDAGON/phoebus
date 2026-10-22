@@ -1,14 +1,19 @@
 //! Filesystem scan: walk the library root, read tags with `lofty`, build a [`Library`],
 //! and refresh the per-album cover cache.
 //!
+//! A scan can start from the tracks of an earlier one ([`rescan_with_covers_progress`]):
+//! files whose size and mtime are unchanged are taken over without being opened, which is
+//! what makes the rescan at every launch cheap.
+//!
 //! Robustness rule: a file that cannot be parsed is skipped with a `log::warn!`. The
 //! scanner never panics and never returns an error — a broken library still yields whatever
 //! could be read.
 
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Cursor;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
@@ -84,15 +89,51 @@ pub fn scan_with_covers(root: &Path, covers_dir: &Path) -> Library {
     scan_with_covers_progress(root, covers_dir, |_| {})
 }
 
-/// [`scan_with_covers`] with a progress callback — the one function the other three
-/// delegate to.
+/// [`scan_with_covers`] with a progress callback: a full scan, reading every file.
+pub fn scan_with_covers_progress<F: FnMut(ScanProgress)>(
+    root: &Path,
+    covers_dir: &Path,
+    progress: F,
+) -> Library {
+    rescan_with_covers_progress(root, covers_dir, Vec::new(), progress)
+}
+
+/// [`scan_with_covers_progress`] that reuses what an earlier scan of the same `root` already
+/// read — the one function every other scan delegates to.
+///
+/// `known` is that scan's tracks ([`Library::tracks`], or a [library
+/// snapshot](crate::snapshot)'s). The walk itself is unchanged, so new, moved and deleted
+/// files are found exactly as before; what changes is the cost per file. A file whose size
+/// and mtime both match its known track is taken over as it is, for the price of the `stat`
+/// the walk already pays. Only new and changed files are opened with `lofty`, which is where
+/// a full scan spends nearly all of its time — it is I/O, not CPU, and on a large library it
+/// is seconds. An empty `known` is a full scan.
 ///
 /// The walk skips every dot-entry (so `<root>/.phoebus` is invisible whatever `covers_dir`
 /// is) and additionally prunes `covers_dir` itself, so pointing the cache at a plainly-named
 /// directory inside the library cannot feed the cache back into the library.
-pub fn scan_with_covers_progress<F: FnMut(ScanProgress)>(
+pub fn rescan_with_covers_progress<F: FnMut(ScanProgress)>(
     root: &Path,
     covers_dir: &Path,
+    known: impl IntoIterator<Item = Track>,
+    progress: F,
+) -> Library {
+    rescan_cancellable(root, covers_dir, known, || false, progress)
+}
+
+/// [`rescan_with_covers_progress`] that can be called off.
+///
+/// `cancelled` is polled between files and between albums. Once it says yes the scan stops
+/// reading and, above all, stops touching `covers_dir` — the cover cache is shared by every
+/// scan of the run, so a scan the app has given up on (its library root changed) must not
+/// keep deleting and rewriting covers the new root's library is using. What comes back is
+/// then an incomplete library that the caller must throw away; at most the one cover
+/// already being written is still finished, atomically.
+pub fn rescan_cancellable<F: FnMut(ScanProgress)>(
+    root: &Path,
+    covers_dir: &Path,
+    known: impl IntoIterator<Item = Track>,
+    cancelled: impl Fn() -> bool,
     mut progress: F,
 ) -> Library {
     progress(ScanProgress {
@@ -103,8 +144,13 @@ pub fn scan_with_covers_progress<F: FnMut(ScanProgress)>(
         current: None,
     });
 
+    // Keyed by the real path, not the id: two lossily-named files can share an id, never a
+    // path.
+    let mut known: HashMap<PathBuf, Track> =
+        known.into_iter().map(|t| (t.abs_path(root), t)).collect();
     let mut tracks: Vec<Track> = Vec::new();
     let mut files_seen = 0usize;
+    let mut reused = 0usize;
 
     let walker = WalkDir::new(root)
         .max_depth(MAX_DEPTH)
@@ -113,6 +159,9 @@ pub fn scan_with_covers_progress<F: FnMut(ScanProgress)>(
         .filter_entry(|e| !is_hidden(e) && e.path() != covers_dir);
 
     for entry in walker {
+        if cancelled() {
+            break;
+        }
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
@@ -124,14 +173,16 @@ pub fn scan_with_covers_progress<F: FnMut(ScanProgress)>(
             continue;
         }
         files_seen += 1;
-        let rel = match read_track(root, entry.path()) {
-            Some(track) => {
-                let rel = track.rel_path.clone();
-                tracks.push(track);
-                Some(rel)
+        let stamp = FileStamp::of(&entry);
+        let track = match known.remove(entry.path()) {
+            Some(track) if stamp.matches(&track) => {
+                reused += 1;
+                Some(track)
             }
-            None => None,
+            _ => read_track(root, entry.path(), stamp),
         };
+        let rel = track.as_ref().map(|t| t.rel_path.clone());
+        tracks.extend(track);
         progress(ScanProgress {
             phase: ScanPhase::Reading,
             done: files_seen,
@@ -140,9 +191,13 @@ pub fn scan_with_covers_progress<F: FnMut(ScanProgress)>(
             current: rel,
         });
     }
+    log::info!(
+        "scan: {files_seen} audio files, {reused} unchanged, {} read",
+        files_seen - reused
+    );
 
     let library = Library::build_with_covers(root.to_path_buf(), covers_dir.to_path_buf(), tracks);
-    refresh_covers(root, covers_dir, &library, &mut progress);
+    refresh_covers(root, covers_dir, &library, &cancelled, &mut progress);
 
     progress(ScanProgress {
         phase: ScanPhase::Done,
@@ -152,6 +207,63 @@ pub fn scan_with_covers_progress<F: FnMut(ScanProgress)>(
         current: None,
     });
     library
+}
+
+/// What the walk learns about a file from its `stat`: enough to tell whether the track an
+/// earlier scan read from it is still current.
+#[derive(Clone, Copy, Debug)]
+struct FileStamp {
+    /// `None` when the file could not be stat'ed: such a file is always read, and its
+    /// track can never be reused.
+    mtime: Option<SystemTime>,
+    size: u64,
+    /// Some permission bit lets someone read the file. Without one (`chmod 000`) the file
+    /// cannot have stayed readable: neither size nor mtime moves on a `chmod`, so this is
+    /// the only trace it leaves in the `stat` the walk already has. Always true off Unix.
+    readable: bool,
+}
+
+impl FileStamp {
+    /// The stamp of a walked entry. The walk does not follow links, so this is the file's
+    /// own metadata, and on most platforms it is already cached in the entry.
+    fn of(entry: &DirEntry) -> FileStamp {
+        match entry.metadata() {
+            Ok(m) => FileStamp {
+                mtime: m.modified().ok(),
+                size: m.len(),
+                readable: has_read_bit(&m),
+            },
+            Err(e) => {
+                log::warn!("scan: no metadata for {} ({e})", entry.path().display());
+                FileStamp {
+                    mtime: None,
+                    size: 0,
+                    readable: false,
+                }
+            }
+        }
+    }
+
+    /// Same size and same mtime, to the nanosecond: the file has not been written since
+    /// `track` was read from it. And still readable, so a file that became unreadable is
+    /// read again — and skipped, as a full scan would skip it — instead of staying listed
+    /// with a track nobody can play.
+    fn matches(self, track: &Track) -> bool {
+        self.readable && self.mtime == Some(track.added_at) && self.size == track.size
+    }
+}
+
+/// Whether any of the owner, group or other read bits is set. A cheap stand-in for "can be
+/// opened": it needs no `open`, only the metadata in hand.
+#[cfg(unix)]
+fn has_read_bit(m: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    m.permissions().mode() & 0o444 != 0
+}
+
+#[cfg(not(unix))]
+fn has_read_bit(_: &fs::Metadata) -> bool {
+    true
 }
 
 /// Dot-files and dot-directories are skipped — including `<root>/.phoebus`, the app's own
@@ -181,7 +293,7 @@ fn has_audio_extension(path: &Path) -> bool {
 ///
 /// Every field falls back to something derived from the path, so an entirely untagged
 /// `Artist/Album/01 Title.mp3` still lands in the right album.
-fn read_track(root: &Path, path: &Path) -> Option<Track> {
+fn read_track(root: &Path, path: &Path, stamp: FileStamp) -> Option<Track> {
     let rel = paths::rel_path_string(root, path)?;
     let mut track = Track::new(&rel);
     // `rel_path_string` renders the path lossily, which only bites when a name is not valid
@@ -195,9 +307,8 @@ fn read_track(root: &Path, path: &Path) -> Option<Track> {
         );
         track.source_path = Some(path.to_path_buf());
     }
-    track.added_at = fs::metadata(path)
-        .and_then(|m| m.modified())
-        .unwrap_or_else(|_| SystemTime::now());
+    track.added_at = stamp.mtime.unwrap_or_else(SystemTime::now);
+    track.size = stamp.size;
 
     let tagged = match lofty::read_from_path(path) {
         Ok(t) => t,
@@ -264,9 +375,10 @@ fn refresh_covers<F: FnMut(ScanProgress)>(
     root: &Path,
     covers_dir: &Path,
     library: &Library,
+    cancelled: &impl Fn() -> bool,
     progress: &mut F,
 ) {
-    if library.album_count() == 0 {
+    if library.album_count() == 0 || cancelled() {
         return;
     }
     if let Err(e) = fs::create_dir_all(covers_dir) {
@@ -276,6 +388,9 @@ fn refresh_covers<F: FnMut(ScanProgress)>(
 
     let total = library.album_count();
     for (i, key) in library.albums().iter().enumerate() {
+        if cancelled() {
+            return;
+        }
         let Some(album) = library.album(key) else {
             continue;
         };
@@ -734,6 +849,219 @@ mod tests {
         let lib = scan(root);
         assert_eq!(lib.covers_dir(), paths::Dirs::inside(root).covers_dir());
         assert!(lib.cover_path(&AlbumKey::new("HOME", "Odyssey")).exists());
+    }
+
+    /// Every track a scan read, with one field changed that a real read would never
+    /// produce — so a rescan that hands it back provably did not open the file.
+    fn marked(lib: &Library) -> Vec<Track> {
+        lib.tracks()
+            .cloned()
+            .map(|mut t| {
+                t.genre = Some("FROM THE LAST SCAN".to_string());
+                t
+            })
+            .collect()
+    }
+
+    fn genre_of(lib: &Library, rel: &str) -> Option<String> {
+        lib.track(TrackId::for_rel_path(rel))
+            .and_then(|t| t.genre.clone())
+    }
+
+    #[test]
+    fn a_rescan_reuses_unchanged_files_and_rereads_changed_ones() {
+        let dir = seeded_root();
+        let root = dir.path();
+        let first = scan(root);
+        assert!(
+            first.tracks().all(|t| t.size > 0),
+            "the scan records every file's size"
+        );
+
+        // One file is rewritten (longer, so the size moves too), one is deleted, one is new.
+        write_wav(&root.join("HOME/Odyssey/01 Intro.wav"), 900);
+        fs::remove_file(root.join("Woodkid/S16/01 Goliath.wav")).expect("rm");
+        write_wav(&root.join("Woodkid/S16/02 Run Boy Run.wav"), 300);
+
+        let again = rescan_with_covers_progress(
+            root,
+            &paths::Dirs::inside(root).covers_dir(),
+            marked(&first),
+            |_| {},
+        );
+        assert_eq!(again.track_count(), 3);
+        assert_eq!(
+            genre_of(&again, "HOME/Odyssey/02 - Resonance.wav").as_deref(),
+            Some("FROM THE LAST SCAN"),
+            "an unchanged file is taken over without being opened"
+        );
+        let intro = again
+            .track(TrackId::for_rel_path("HOME/Odyssey/01 Intro.wav"))
+            .expect("the rewritten track is still listed");
+        assert_eq!(intro.genre, None, "a changed file is read again");
+        assert!(intro.duration.as_millis() >= 850, "with its new duration");
+        assert!(
+            again
+                .track(TrackId::for_rel_path("Woodkid/S16/01 Goliath.wav"))
+                .is_none(),
+            "a deleted file leaves the library"
+        );
+        assert_eq!(
+            genre_of(&again, "Woodkid/S16/02 Run Boy Run.wav"),
+            None,
+            "a new file is read"
+        );
+    }
+
+    /// Size alone is not enough: a re-tag that happens to keep the size still moves the
+    /// mtime, and that must be enough to read the file again.
+    #[test]
+    fn a_rescan_rereads_a_file_whose_mtime_moved_at_the_same_size() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let file = root.join("HOME/Odyssey/01 Intro.wav");
+        write_wav(&file, 300);
+        set_mtime(
+            &file,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000),
+        );
+        let first = scan(root);
+
+        set_mtime(
+            &file,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000),
+        );
+        let again = rescan_with_covers_progress(
+            root,
+            &paths::Dirs::inside(root).covers_dir(),
+            marked(&first),
+            |_| {},
+        );
+        assert_eq!(genre_of(&again, "HOME/Odyssey/01 Intro.wav"), None);
+        assert_eq!(
+            again.tracks().next().expect("track").added_at,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000)
+        );
+    }
+
+    /// Known tracks are hints, never facts: one that lies about a file that has since been
+    /// corrupted is dropped with the file, exactly as a full scan would drop it.
+    #[test]
+    fn a_rescan_still_skips_a_file_that_became_unreadable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let file = root.join("HOME/Odyssey/01 Intro.wav");
+        write_wav(&file, 300);
+        let first = scan(root);
+        fs::write(&file, b"NOT A WAV ANY MORE").expect("corrupt");
+
+        let again = rescan_with_covers_progress(
+            root,
+            &paths::Dirs::inside(root).covers_dir(),
+            marked(&first),
+            |_| {},
+        );
+        assert!(
+            again.is_empty(),
+            "the corrupted file is skipped, not reused"
+        );
+    }
+
+    /// A `chmod` moves neither size nor mtime, so an unreadable file would sail through the
+    /// stamp check and stay in the library as a track that cannot be played.
+    #[cfg(unix)]
+    #[test]
+    fn a_rescan_does_not_reuse_a_file_that_lost_its_read_permission() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let file = root.join("HOME/Odyssey/01 Intro.wav");
+        write_wav(&file, 300);
+        write_wav(&root.join("HOME/Odyssey/02 Outro.wav"), 300);
+        let first = scan(root);
+        assert_eq!(first.track_count(), 2);
+
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).expect("chmod");
+        let again = rescan_with_covers_progress(
+            root,
+            &paths::Dirs::inside(root).covers_dir(),
+            marked(&first),
+            |_| {},
+        );
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).expect("chmod back");
+
+        // Read again, not taken over: a full scan drops it (or, as root, which can open
+        // anything, lists it with freshly read tags — never with the marked ones).
+        assert_ne!(
+            genre_of(&again, "HOME/Odyssey/01 Intro.wav").as_deref(),
+            Some("FROM THE LAST SCAN")
+        );
+        assert_eq!(
+            genre_of(&again, "HOME/Odyssey/02 Outro.wav").as_deref(),
+            Some("FROM THE LAST SCAN"),
+            "a readable neighbour is still reused"
+        );
+    }
+
+    /// A scan the app gave up on must not touch the shared cover cache any more.
+    #[test]
+    fn a_cancelled_scan_stops_writing_covers() {
+        let music = tempfile::tempdir().expect("tempdir");
+        let data = tempfile::tempdir().expect("tempdir");
+        let covers = data.path().join("covers");
+        let root = music.path();
+        write_wav_with_cover(&root.join("HOME/Odyssey/01 Intro.wav"), 300, 100);
+        write_wav_with_cover(&root.join("Woodkid/S16/01 Goliath.wav"), 300, 100);
+        let cover_files = || fs::read_dir(&covers).map_or(0, |d| d.count());
+
+        let lib = rescan_cancellable(root, &covers, Vec::new(), || true, |_| {});
+        assert_eq!(
+            cover_files(),
+            0,
+            "cancelled before it began: no cover cache"
+        );
+        assert_eq!(lib.track_count(), 0, "…and no more reading either");
+
+        // Cancelled while it extracts: the album in hand is finished, the next is not.
+        let cancel = std::cell::Cell::new(false);
+        rescan_cancellable(
+            root,
+            &covers,
+            Vec::new(),
+            || cancel.get(),
+            |p| {
+                if p.phase == ScanPhase::Artwork {
+                    cancel.set(true);
+                }
+            },
+        );
+        assert_eq!(cover_files(), 1);
+
+        // Not cancelled: both.
+        scan_with_covers(root, &covers);
+        assert_eq!(cover_files(), 2);
+    }
+
+    /// End to end with the snapshot: what a scan saves, the next launch loads, and a
+    /// rescan seeded with it reuses every track without reading the files.
+    #[test]
+    fn a_rescan_seeded_from_a_snapshot_changes_nothing() {
+        let dir = seeded_root();
+        let data = tempfile::tempdir().expect("tempdir");
+        let dirs = paths::Dirs::at(data.path());
+        let root = dir.path();
+        let scanned = scan_with_covers(root, &dirs.covers_dir());
+        crate::snapshot::save(&dirs.library_path(), &scanned).expect("save");
+
+        let loaded = crate::snapshot::load(&dirs.library_path(), root, &dirs.covers_dir())
+            .expect("a fresh snapshot loads");
+        assert!(scanned.changed_albums(&loaded).is_empty());
+        let rescanned =
+            rescan_with_covers_progress(root, &dirs.covers_dir(), loaded.tracks().cloned(), |_| {});
+        assert!(
+            loaded.changed_albums(&rescanned).is_empty(),
+            "nothing on disk moved, so nothing in the library may"
+        );
     }
 
     #[test]
