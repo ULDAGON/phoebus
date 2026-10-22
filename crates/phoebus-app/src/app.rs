@@ -182,7 +182,7 @@ impl Phoebus {
         // `Action::SetArtistListW`.
         app.vstate.artists.list_w = app.controller.artist_list_w();
         // Where the Import view sends new songs; kept in step by `set_library_root`.
-        app.vstate.import.root = app.root.clone();
+        app.vstate.import.set_root(app.root.clone());
         // Before the first frame: nothing above this line paints.
         if app.external.is_some() && app.controller.follow_desktop_theme() {
             app.apply_external(&cc.egui_ctx);
@@ -539,7 +539,7 @@ impl Phoebus {
 
         self.controller.stop();
         self.root = root;
-        self.vstate.import.root = self.root.clone();
+        self.vstate.import.set_root(self.root.clone());
         self.library = Library::empty_with_covers(&self.root, self.dirs.covers_dir());
         // Nothing resolves against an empty library; the scan below resolves them again.
         self.controller.favorites.resolve(&self.library);

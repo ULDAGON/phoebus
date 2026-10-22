@@ -15,21 +15,35 @@
 //! The first script run triggers macOS's automation consent ("Phoebus wants to control
 //! Music"). Until the user answers, `osascript` blocks; a refusal comes back as error
 //! -1743 and is reported as such ([`reason`]).
+//!
+//! Every `tell` runs inside `with timeout of 600 seconds`. AppleScript's own default is two
+//! minutes, after which the *script* gives up while the Music app carries on — so an `add`
+//! of a large file behind a slow consent dialog would report a failure for a song that then
+//! arrives anyway. A timeout is therefore its own answer ([`timed_out`]): not "failed" but
+//! "unknown", and the import list must not offer that file to the Music app a second time.
+//!
+//! One thing is read without any script: where the Music app keeps its media folder
+//! ([`media_folder`]), straight from its preferences file. That never launches the app.
 
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use super::{Failure, Fields, ImageKind};
+use super::{Failure, Field, Fields, ImageKind};
 
 /// `osascript`'s fixed location on every macOS.
 const OSASCRIPT: &str = "/usr/bin/osascript";
 
-/// How long one script may take. Generous, because the first one may launch the Music app
-/// and then wait on the consent dialog for as long as the user takes to read it.
-const TIMEOUT: Duration = Duration::from_secs(180);
+/// How long one script may take before `osascript` is killed: a minute past the scripts'
+/// own `with timeout of 600 seconds`, so the script's timeout — which the Music app hears
+/// about — always comes first, and this is only the net under a hung process.
+const TIMEOUT: Duration = Duration::from_secs(660);
+
+/// The status of an `osascript` run that got no answer in time. See [`timed_out`].
+pub const DID_NOT_ANSWER: &str = "MUSIC APP DID NOT ANSWER";
 
 /// Poll interval while waiting for `osascript`.
 const POLL: Duration = Duration::from_millis(25);
@@ -46,37 +60,58 @@ const ERR_GONE: i32 = 9002;
 /// format it cannot play.
 pub const ADD: &str = r#"on run argv
 	set src to POSIX file (item 1 of argv)
-	tell application "Music"
-		set t to add src
-		if class of t is list then
-			if t is {} then error "the Music app added nothing" number 9001
-			set t to item 1 of t
-		end if
-		if t is missing value then error "the Music app added nothing" number 9001
-		set pid to persistent ID of t
-		set loc to location of t
-	end tell
+	with timeout of 600 seconds
+		tell application "Music"
+			set t to add src
+			if class of t is list then
+				if t is {} then error "the Music app added nothing" number 9001
+				set t to item 1 of t
+			end if
+			if t is missing value then error "the Music app added nothing" number 9001
+			set pid to persistent ID of t
+			set loc to location of t
+		end tell
+	end timeout
 	if loc is missing value then return pid & linefeed
 	return pid & linefeed & (POSIX path of loc)
 end run"#;
 
-/// Write the editable fields of one track. `argv`: persistent ID, title, artist, album,
-/// album artist, genre, year (`0` = none), track number (`0` = none).
+/// Write some of the editable fields of one track. `argv`: the persistent ID, then one
+/// `key`, `value` pair per field to change — and only those, so a field the user did not
+/// touch is never rewritten with whatever Phoebus guessed for it ([`Field`]). The keys are
+/// the Music app's own property names ([`music_key`]); `year` and `track number` take an
+/// integer, `0` meaning none.
 pub const SET_FIELDS: &str = r#"on run argv
 	set pid to item 1 of argv
-	tell application "Music"
-		set hits to (every track of library playlist 1 whose persistent ID is pid)
-		if hits is {} then error "no such track in the Music library" number 9002
-		set t to item 1 of hits
-		set name of t to item 2 of argv
-		set artist of t to item 3 of argv
-		set album of t to item 4 of argv
-		set album artist of t to item 5 of argv
-		set genre of t to item 6 of argv
-		set year of t to ((item 7 of argv) as integer)
-		set track number of t to ((item 8 of argv) as integer)
-		set loc to location of t
-	end tell
+	with timeout of 600 seconds
+		tell application "Music"
+			set hits to (every track of library playlist 1 whose persistent ID is pid)
+			if hits is {} then error "no such track in the Music library" number 9002
+			set t to item 1 of hits
+			repeat with i from 2 to ((count of argv) - 1) by 2
+				set k to item i of argv
+				set v to item (i + 1) of argv
+				if k is "name" then
+					set name of t to v
+				else if k is "artist" then
+					set artist of t to v
+				else if k is "album" then
+					set album of t to v
+				else if k is "album artist" then
+					set album artist of t to v
+				else if k is "genre" then
+					set genre of t to v
+				else if k is "year" then
+					set year of t to (v as integer)
+				else if k is "track number" then
+					set track number of t to (v as integer)
+				else
+					error "unknown field " & k number 9003
+				end if
+			end repeat
+			set loc to location of t
+		end tell
+	end timeout
 	if loc is missing value then return pid & linefeed
 	return pid & linefeed & (POSIX path of loc)
 end run"#;
@@ -100,13 +135,15 @@ pub const SET_ARTWORK: &str = r#"on run argv
 		error m number n
 	end try
 	close access f
-	tell application "Music"
-		set hits to (every track of library playlist 1 whose persistent ID is pid)
-		if hits is {} then error "no such track in the Music library" number 9002
-		set t to item 1 of hits
-		set data of artwork 1 of t to pic
-		set loc to location of t
-	end tell
+	with timeout of 600 seconds
+		tell application "Music"
+			set hits to (every track of library playlist 1 whose persistent ID is pid)
+			if hits is {} then error "no such track in the Music library" number 9002
+			set t to item 1 of hits
+			set data of artwork 1 of t to pic
+			set loc to location of t
+		end tell
+	end timeout
 	if loc is missing value then return pid & linefeed
 	return pid & linefeed & (POSIX path of loc)
 end run"#;
@@ -153,24 +190,39 @@ pub fn add_invocation(src: &Path) -> Invocation {
     }
 }
 
-/// The [`SET_FIELDS`] run for the track `id`.
-pub fn fields_invocation(id: &str, fields: &Fields) -> Invocation {
+/// The Music app's property name for a field — the key [`SET_FIELDS`] dispatches on.
+pub fn music_key(field: Field) -> &'static str {
+    match field {
+        Field::Title => "name",
+        Field::Artist => "artist",
+        Field::Album => "album",
+        Field::AlbumArtist => "album artist",
+        Field::Genre => "genre",
+        Field::Year => "year",
+        Field::TrackNo => "track number",
+    }
+}
+
+/// The [`SET_FIELDS`] run for the track `id`, writing the `changed` items of `fields`.
+pub fn fields_invocation(id: &str, fields: &Fields, changed: &[Field]) -> Invocation {
     let number = |n: Option<u32>| n.unwrap_or(0).to_string();
+    let mut args: Vec<OsString> = vec![id.into()];
+    for field in changed {
+        let value = match field {
+            Field::Title => fields.title.trim().to_string(),
+            Field::Artist => fields.artist.trim().to_string(),
+            Field::Album => fields.album.trim().to_string(),
+            Field::AlbumArtist => fields.album_artist.trim().to_string(),
+            Field::Genre => fields.genre.trim().to_string(),
+            Field::Year => number(fields.year),
+            Field::TrackNo => number(fields.track_no),
+        };
+        args.push(music_key(*field).into());
+        args.push(value.into());
+    }
     Invocation {
         script: SET_FIELDS,
-        args: [
-            id.to_string(),
-            fields.title.trim().to_string(),
-            fields.artist.trim().to_string(),
-            fields.album.trim().to_string(),
-            fields.album_artist.trim().to_string(),
-            fields.genre.trim().to_string(),
-            number(fields.year),
-            number(fields.track_no),
-        ]
-        .into_iter()
-        .map(OsString::from)
-        .collect(),
+        args,
     }
 }
 
@@ -234,7 +286,7 @@ pub fn reason(stderr: &str) -> String {
     match error_number(stderr) {
         Some(-1743) => "NOT ALLOWED TO CONTROL MUSIC",
         Some(-600 | -609 | -903) => "MUSIC APP NOT AVAILABLE",
-        Some(-1712) => "MUSIC APP DID NOT ANSWER",
+        Some(-1712) => DID_NOT_ANSWER,
         Some(-43) => "FILE NOT FOUND",
         Some(-54 | -61 | -5000) => "FILE NOT ACCESSIBLE",
         Some(ERR_GONE | -1728) => "NOT IN THE MUSIC LIBRARY",
@@ -261,7 +313,7 @@ pub fn run(invocation: &Invocation) -> Result<MusicTrack, Failure> {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(Failure::new(
-                    "MUSIC APP DID NOT ANSWER",
+                    DID_NOT_ANSWER,
                     format!("osascript ran for more than {} s", TIMEOUT.as_secs()),
                 ));
             }
@@ -291,9 +343,74 @@ pub fn add(src: &Path) -> Result<MusicTrack, Failure> {
     run(&add_invocation(src))
 }
 
-/// Write `fields` to the track `id`.
-pub fn set_fields(id: &str, fields: &Fields) -> Result<MusicTrack, Failure> {
-    run(&fields_invocation(id, fields))
+/// Write the `changed` items of `fields` to the track `id`.
+pub fn set_fields(id: &str, fields: &Fields, changed: &[Field]) -> Result<MusicTrack, Failure> {
+    run(&fields_invocation(id, fields, changed))
+}
+
+/// True if `failure` is a run that got no answer in time — the Music app may well have done
+/// the work anyway.
+pub fn timed_out(failure: &Failure) -> bool {
+    failure.reason == DID_NOT_ANSWER
+}
+
+/// The Music app's media folder, as its preferences say (`media-folder-url` in
+/// `com.apple.Music`), read with `defaults` — a plain read of a preferences file, which
+/// neither launches the Music app nor sends it anything.
+///
+/// Read once per process: it changes only when the user moves the media folder in Music's
+/// settings, and [`super::Mode::for_root`] would otherwise read it at every root change.
+/// `None` off macOS, without a Music app, or when the key is not there.
+pub fn media_folder() -> Option<PathBuf> {
+    static FOLDER: OnceLock<Option<PathBuf>> = OnceLock::new();
+    FOLDER
+        .get_or_init(|| {
+            if !cfg!(target_os = "macos") {
+                return None;
+            }
+            let out = Command::new("/usr/bin/defaults")
+                .args(["read", "com.apple.Music", "media-folder-url"])
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            let folder = parse_file_url(String::from_utf8_lossy(&out.stdout).trim());
+            log::info!("music app: media folder {folder:?}");
+            folder
+        })
+        .clone()
+}
+
+/// A `file://` URL as a path: `file:///Users/me/Music/Music/Media.localized/` →
+/// `/Users/me/Music/Music/Media.localized`, percent-escapes decoded. `None` for anything
+/// that is not a local file URL.
+pub fn parse_file_url(url: &str) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let rest = url.strip_prefix("file://")?;
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    if !rest.starts_with('/') {
+        return None;
+    }
+    let bytes = rest.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    while out.len() > 1 && out.last() == Some(&b'/') {
+        out.pop();
+    }
+    Some(PathBuf::from(OsString::from_vec(out)))
 }
 
 /// Set the artwork of the track `id` from the image at `image`.
@@ -335,7 +452,7 @@ mod tests {
             artist: "-n".into(),
             ..sample()
         };
-        let argv = fields_invocation("0123456789ABCDEF", &fields).argv();
+        let argv = fields_invocation("0123456789ABCDEF", &fields, &Field::ALL).argv();
         let (script, args) = split(&argv);
         assert_eq!(script, SET_FIELDS);
         let args: Vec<String> = args
@@ -346,15 +463,36 @@ mod tests {
             args,
             [
                 "0123456789ABCDEF",
+                "name",
                 r#"Say "Hi" & \ bye"#,
+                "artist",
                 "-n",
+                "album",
                 "Odyssey",
+                "album artist",
                 "HOME",
+                "genre",
                 "Synthwave",
+                "year",
                 "2014",
+                "track number",
                 "3"
             ]
         );
+    }
+
+    /// The point of the key/value form: an edit of the genre sends the genre and nothing
+    /// else, so the Music app never sees the album artist Phoebus only guessed.
+    #[test]
+    fn only_the_changed_fields_are_sent() {
+        let argv = fields_invocation("0123456789ABCDEF", &sample(), &[Field::Genre]).argv();
+        let (_, args) = split(&argv);
+        assert_eq!(args, ["0123456789ABCDEF", "genre", "Synthwave"]);
+        // Every key the builder can send is one the script handles.
+        for field in Field::ALL {
+            let branch = format!("k is \"{}\" then", music_key(field));
+            assert!(SET_FIELDS.contains(&branch), "{branch}");
+        }
     }
 
     #[test]
@@ -364,10 +502,10 @@ mod tests {
             track_no: None,
             ..sample()
         };
-        let argv = fields_invocation("0123456789ABCDEF", &fields).argv();
+        let argv =
+            fields_invocation("0123456789ABCDEF", &fields, &[Field::Year, Field::TrackNo]).argv();
         let (_, args) = split(&argv);
-        assert_eq!(args[6], "0");
-        assert_eq!(args[7], "0");
+        assert_eq!(args, ["0123456789ABCDEF", "year", "0", "track number", "0"]);
     }
 
     #[test]
@@ -383,21 +521,33 @@ mod tests {
     /// an off-by-one here would set the album artist from the genre.
     #[test]
     fn each_script_reads_exactly_the_items_its_builder_sends() {
-        for (script, count) in [(ADD, 1), (SET_FIELDS, 8), (SET_ARTWORK, 3)] {
+        for (script, count) in [(ADD, 1), (SET_ARTWORK, 3)] {
             assert!(script.starts_with("on run argv") && script.ends_with("end run"));
             for n in 1..=count {
                 assert!(script.contains(&format!("item {n} of argv")), "item {n}");
             }
             assert!(!script.contains(&format!("item {} of argv", count + 1)));
         }
+        // SET_FIELDS reads the ID, then walks the pairs to the end of `argv`.
+        assert!(SET_FIELDS.contains("item 1 of argv"));
+        assert!(SET_FIELDS.contains("repeat with i from 2 to ((count of argv) - 1) by 2"));
         assert_eq!(add_invocation(Path::new("/x")).args.len(), 1);
-        assert_eq!(fields_invocation("x", &sample()).args.len(), 8);
+        assert_eq!(
+            fields_invocation("x", &sample(), &Field::ALL).args.len(),
+            1 + 2 * Field::ALL.len()
+        );
         assert_eq!(
             artwork_invocation("x", Path::new("/x"), ImageKind::Png)
                 .args
                 .len(),
             3
         );
+        // Every Music call has a timeout longer than AppleScript's two-minute default,
+        // and the process net is longer still.
+        for script in [ADD, SET_FIELDS, SET_ARTWORK] {
+            assert!(script.contains("with timeout of 600 seconds"));
+        }
+        assert!(TIMEOUT > Duration::from_secs(600));
         // The error numbers the scripts raise are the ones `reason` maps.
         assert!(ADD.contains(&format!("number {ERR_REFUSED}")));
         assert!(SET_FIELDS.contains(&format!("number {ERR_GONE}")));
@@ -456,6 +606,34 @@ mod tests {
         );
         assert_eq!(reason("garbage without a number"), "MUSIC APP REFUSED");
         assert_eq!(error_number("(abc)"), None);
+    }
+
+    #[test]
+    fn a_timeout_is_told_apart_from_a_refusal() {
+        let late = Failure::new(
+            reason("execution error: Music got an error: AppleEvent timed out. (-1712)"),
+            "",
+        );
+        assert!(timed_out(&late));
+        assert!(!timed_out(&Failure::new(reason("(9001)"), "")));
+    }
+
+    #[test]
+    fn the_media_folder_preference_parses_as_a_path() {
+        assert_eq!(
+            parse_file_url("file:///Users/me/Music/Music/Media.localized/"),
+            Some(PathBuf::from("/Users/me/Music/Music/Media.localized"))
+        );
+        assert_eq!(
+            parse_file_url("file:///Volumes/My%20Disk/K%C5%8Dji%20Media/"),
+            Some(PathBuf::from("/Volumes/My Disk/Kōji Media"))
+        );
+        assert_eq!(
+            parse_file_url("file://localhost/srv/m"),
+            Some(PathBuf::from("/srv/m"))
+        );
+        assert_eq!(parse_file_url("https://example.com/x"), None);
+        assert_eq!(parse_file_url("file:///bad%zz"), None);
     }
 
     #[test]

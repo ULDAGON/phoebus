@@ -5,7 +5,8 @@
 //!
 //! Audio files and folders dropped anywhere on the window are imported (the app hands them
 //! over through [`State::drop_paths`] and brings this view up); folders are walked like the
-//! scanner walks the library. Anything that is neither audio nor a cover candidate is
+//! scanner walks the library, on a side thread — a dropped folder can be huge or on a
+//! network share, and the window must not freeze for it. Anything that is neither audio nor a cover candidate is
 //! counted and named under the field instead of silently ignored. How a file gets into the
 //! library — the Music app or a copy — is [`phoebus_core::import`]'s business; this view
 //! only says which, in the line under the heading.
@@ -29,16 +30,16 @@
 //! says so once and the app rescans, which is what makes the songs appear everywhere else.
 //! The list itself lives for the session only and survives that rescan.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use egui::{Align2, Rect, Sense, Stroke, StrokeKind, TextureHandle, Ui, Vec2};
-use phoebus_core::import::{self, Failure, Fields, Kind, Mode, Outcome, Placed};
+use phoebus_core::import::{self, Dropped, Edit, Failure, Fields, Kind, Mode, Outcome, Placed};
 use phoebus_core::{AlbumKey, Library};
 
 use crate::artwork::{self, Artwork};
-use crate::importer::{Job, Reply, RowId, Worker};
+use crate::importer::{CoverId, Job, Reply, RowId, SideJob, Worker};
 use crate::nav::Ctx;
 use crate::theme;
 use crate::views;
@@ -49,13 +50,16 @@ const NAMES_SHOWN: usize = 3;
 /// How often a running import's spinner turns.
 const SPIN_MS: u64 = 120;
 /// Hovered paths looked at to label the drop field. A drag of a thousand files is labelled
-/// by the first few just as well, and each look is a `stat`.
+/// by the first few just as well, and each look is a `stat` (once per drag, not per frame).
 const HOVER_PROBE: usize = 64;
 /// Narrowest the year and track inputs get (four digits and the margins); they grow to
 /// half again that, sharing a third of the editor between them.
 const NUMBER_FIELD_W: f32 = 72.0;
 /// Gap between two editor inputs on one line.
 const FIELD_GAP: f32 = 12.0;
+/// Why `✎` is dead on a song the Music app did not copy.
+const ORIGINAL_TIP: &str = "THE MUSIC APP KEPT YOUR ORIGINAL FILE — AN EDIT WOULD CHANGE IT, \
+                            SO EDIT IT IN MUSIC IF YOU MEAN TO";
 
 /// Where one dropped file stands.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,7 +72,21 @@ pub enum Status {
     Imported,
     /// It was inside the library root already; nothing was done.
     AlreadyInLibrary,
+    /// The Music app did not answer in time and may have added it anyway. Counted as
+    /// listed, so dropping it again does not add it twice.
+    Uncertain(Failure),
     /// It could not be imported, and why.
+    Failed(Failure),
+}
+
+/// How the last edit of a row went.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Note {
+    /// All of it landed.
+    Saved,
+    /// Some of it landed (the rest is in the failure).
+    Partly(Failure),
+    /// None of it landed.
     Failed(Failure),
 }
 
@@ -76,7 +94,7 @@ pub enum Status {
 enum Thumb {
     /// Nothing yet — the placeholder.
     None,
-    /// A decoded, uploaded thumbnail.
+    /// An uploaded thumbnail, shared by every row with the same artwork.
     Image(TextureHandle),
     /// A library album's cover from the shared cache (the screenshot tour's sample rows).
     Album(AlbumKey),
@@ -89,7 +107,7 @@ struct Row {
     src: PathBuf,
     /// The library root it was imported into — edits go there even if the root changes.
     root: PathBuf,
-    /// Its fields, once read; after an edit, the edited ones.
+    /// Its fields as shown: once read, then as last saved.
     fields: Option<Fields>,
     status: Status,
     /// Where it went, once imported — what an edit is sent to.
@@ -99,10 +117,27 @@ struct Row {
     outside: bool,
     /// The fields an edit in flight is writing.
     saving: Option<Fields>,
-    /// How the last edit went: `SAVED`, or why not.
-    note: Option<Result<(), Failure>>,
+    /// How the last edit went.
+    note: Option<Note>,
     /// A sample row of the screenshot tour: drawn like any other, never saved anywhere.
     sample: bool,
+}
+
+impl Row {
+    /// Whether `✎` may open an editor on this row, or why not (the tooltip on a dead `✎`).
+    /// `None` when there is nothing to edit yet, and no `✎` at all.
+    fn editable(&self) -> Option<Result<(), &'static str>> {
+        let imported = self.status == Status::Imported && (self.placed.is_some() || self.sample);
+        if !imported {
+            return None;
+        }
+        // The track points at the user's own file: editing it would rewrite the original.
+        Some(if self.outside {
+            Err(ORIGINAL_TIP)
+        } else {
+            Ok(())
+        })
+    }
 }
 
 /// The open row editor: the inputs as typed, and a cover waiting to be saved.
@@ -174,34 +209,91 @@ impl Editor {
 }
 
 /// Everything the view remembers for the session.
-#[derive(Default)]
 pub struct State {
-    /// The library root new imports go into. Written by the app.
-    pub root: PathBuf,
+    /// The library root new imports go into. Set through [`State::set_root`].
+    root: PathBuf,
+    /// How `root` takes new songs — worked out once per root, never per frame.
+    mode: Mode,
     /// A library scan is running. Written by the app every frame.
     pub scanning: bool,
     /// Newest drop first; each drop in its own order.
     rows: Vec<Row>,
     next_id: RowId,
     worker: Worker,
-    /// Jobs sent and not yet answered.
+    /// Jobs and side jobs sent and not yet answered.
     jobs: usize,
+    /// Drops still being walked.
+    walking: usize,
     /// Something landed in the library since the last rescan request.
     dirty: bool,
     /// What the last drop could not use.
     notice: Option<String>,
     editor: Option<Editor>,
+    /// Every source this session has a live row for — imported, in flight, already in the
+    /// library, or of unknown fate. A set, so a re-drop of a thousand files is a thousand
+    /// lookups, not a million comparisons. Failed sources leave it, so they can be retried.
+    listed: HashSet<PathBuf>,
+    /// One texture per distinct cover, shared by every row that shows it.
+    textures: HashMap<CoverId, TextureHandle>,
+    /// The hovered paths [`State::hover`] last looked at, and what it made of them.
+    hover_key: Vec<Option<PathBuf>>,
+    hover: Hover,
+}
+
+impl Default for State {
+    fn default() -> State {
+        State {
+            root: PathBuf::new(),
+            mode: Mode::Copy,
+            scanning: false,
+            rows: Vec::new(),
+            next_id: 0,
+            worker: Worker::default(),
+            jobs: 0,
+            walking: 0,
+            dirty: false,
+            notice: None,
+            editor: None,
+            listed: HashSet::new(),
+            textures: HashMap::new(),
+            hover_key: Vec::new(),
+            hover: Hover::default(),
+        }
+    }
 }
 
 impl State {
-    /// Take a drop. Audio files and folders are queued for import; an image becomes the
-    /// open editor's new cover; everything else is reported. Returns `true` when there
-    /// was anything to take, which is the app's cue to show this view.
+    /// Point new imports at `root`, and work out how it takes them ([`Mode::for_root`]).
+    /// Called by the app at start-up and whenever the library root changes.
+    pub fn set_root(&mut self, root: PathBuf) {
+        self.mode = Mode::for_root(&root);
+        self.root = root;
+    }
+
+    /// Take a drop. The walk runs on a side thread ([`SideJob::Sort`]) — a dropped folder
+    /// may be huge, or on a network share — and [`State::poll`] files what it finds.
+    /// Returns `true` when there was anything to take, which is the app's cue to show this
+    /// view.
     pub fn drop_paths(&mut self, ctx: &egui::Context, paths: &[PathBuf]) -> bool {
         if paths.is_empty() {
             return false;
         }
-        let dropped = import::sort_drop(paths);
+        let job = SideJob::Sort {
+            paths: paths.to_vec(),
+        };
+        if self.worker.side(ctx, job) {
+            self.jobs += 1;
+            self.walking += 1;
+        } else {
+            self.notice = Some("COULD NOT READ THE DROP".to_string());
+        }
+        true
+    }
+
+    /// A walked drop: images go to the open editor, new audio files become rows, and what
+    /// cannot be used is reported.
+    fn sorted(&mut self, ctx: &egui::Context, dropped: Dropped) {
+        self.walking = self.walking.saturating_sub(1);
         let mut notes: Vec<String> = Vec::new();
 
         if let Some(image) = dropped.images.first() {
@@ -209,11 +301,11 @@ impl State {
                 Some(editor) => {
                     editor.error = None;
                     editor.checking = true;
-                    let job = Job::Preview {
+                    let job = SideJob::Preview {
                         id: editor.id,
                         path: image.clone(),
                     };
-                    if self.worker.send(ctx, job) {
+                    if self.worker.side(ctx, job) {
                         self.jobs += 1;
                     } else {
                         editor.checking = false;
@@ -225,20 +317,14 @@ impl State {
             }
         }
 
-        let mode = Mode::for_root(&self.root);
         let mut fresh: Vec<Row> = Vec::new();
         let mut repeated = 0;
         for src in dropped.audio {
-            let listed = self
-                .rows
-                .iter()
-                .chain(&fresh)
-                .any(|r| r.src == src && !matches!(r.status, Status::Failed(_)));
-            if listed {
+            if !self.listed.insert(src.clone()) {
                 repeated += 1;
                 continue;
             }
-            fresh.push(self.queue(ctx, src, mode));
+            fresh.push(self.queue(ctx, src));
         }
         if repeated > 0 {
             notes.push(format!("{repeated} ALREADY IN THIS LIST"));
@@ -249,23 +335,23 @@ impl State {
         // Newest drop on top, so what was just dropped is what is on screen.
         self.rows.splice(0..0, fresh);
         self.notice = (!notes.is_empty()).then(|| notes.join(theme::SEP));
-        true
     }
 
     /// A new row for `src`, its import already sent.
-    fn queue(&mut self, ctx: &egui::Context, src: PathBuf, mode: Mode) -> Row {
+    fn queue(&mut self, ctx: &egui::Context, src: PathBuf) -> Row {
         let id = self.next_id;
         self.next_id += 1;
         let job = Job::Import {
             id,
             src: src.clone(),
             root: self.root.clone(),
-            mode,
+            mode: self.mode,
         };
         let status = if self.worker.send(ctx, job) {
             self.jobs += 1;
             Status::Queued
         } else {
+            self.listed.remove(&src);
             Status::Failed(Failure::new("IMPORT WORKER NOT RUNNING", ""))
         };
         Row {
@@ -301,21 +387,37 @@ impl State {
         false
     }
 
+    /// The shared texture for a cover, uploaded the first time it is seen.
+    fn texture(&mut self, ctx: &egui::Context, thumb: crate::importer::Thumb) -> TextureHandle {
+        self.textures
+            .entry(thumb.cover)
+            .or_insert_with(|| {
+                ctx.load_texture(
+                    format!("import-cover-{:016x}", thumb.cover),
+                    thumb.image,
+                    egui::TextureOptions::LINEAR,
+                )
+            })
+            .clone()
+    }
+
     fn apply(&mut self, ctx: &egui::Context, reply: Reply) {
-        let upload = |id: RowId, image: Arc<egui::ColorImage>| {
-            ctx.load_texture(format!("import-{id}"), image, egui::TextureOptions::LINEAR)
-        };
         match reply {
+            Reply::Sorted { dropped } => self.sorted(ctx, dropped),
             Reply::Read { id, fields, thumb } => {
+                let texture = thumb.map(|t| self.texture(ctx, t));
                 let Some(row) = self.rows.iter_mut().find(|r| r.id == id) else {
                     return;
                 };
                 match fields {
                     Ok(fields) => row.fields = Some(fields),
-                    Err(e) => row.status = Status::Failed(e),
+                    Err(e) => {
+                        self.listed.remove(&row.src);
+                        row.status = Status::Failed(e);
+                    }
                 }
-                if let Some(image) = thumb {
-                    row.thumb = Thumb::Image(upload(id, image));
+                if let Some(texture) = texture {
+                    row.thumb = Thumb::Image(texture);
                 }
             }
             Reply::Started { id } => {
@@ -337,42 +439,60 @@ impl State {
                         self.dirty = true;
                     }
                     Ok(Outcome::AlreadyInLibrary) => row.status = Status::AlreadyInLibrary,
-                    // A file that failed its read already says why; keep the first reason.
-                    Err(e) if !matches!(row.status, Status::Failed(_)) => {
-                        row.status = Status::Failed(e);
+                    Ok(Outcome::Uncertain(e)) => {
+                        // It may well be in the library by now: rescan, and keep it listed.
+                        row.status = Status::Uncertain(e);
+                        self.dirty = true;
                     }
-                    Err(_) => {}
+                    Err(e) => {
+                        self.listed.remove(&row.src);
+                        // A file that failed its read already says why; keep that reason.
+                        if !matches!(row.status, Status::Failed(_)) {
+                            row.status = Status::Failed(e);
+                        }
+                    }
                 }
             }
-            Reply::Edited { id, result, thumb } => {
+            Reply::Edited { id, applied, thumb } => {
+                let texture = thumb.map(|t| self.texture(ctx, t));
                 let editing = self.editor.as_ref().is_some_and(|e| e.id == id);
                 let Some(row) = self.rows.iter_mut().find(|r| r.id == id) else {
                     return;
                 };
                 let saved = row.saving.take();
-                match result {
-                    Ok(placed) => {
-                        row.outside = placed.outside(&row.root);
-                        row.placed = Some(placed);
-                        if saved.is_some() {
-                            row.fields = saved;
-                        }
-                        if let Some(image) = thumb {
-                            row.thumb = Thumb::Image(upload(id, image));
-                        }
-                        row.note = Some(Ok(()));
-                        self.dirty = true;
-                        if editing {
-                            self.editor = None;
-                        }
+                row.outside = applied.placed.outside(&row.root);
+                row.placed = Some(applied.placed.clone());
+                // Whatever landed is shown as landed, whatever else went wrong.
+                if applied.fields
+                    && let Some(fields) = saved
+                {
+                    row.fields = Some(fields);
+                }
+                if let Some(texture) = texture {
+                    row.thumb = Thumb::Image(texture);
+                }
+                if applied.anything() {
+                    self.dirty = true;
+                }
+                let note = match applied.failure {
+                    None => Note::Saved,
+                    Some(e) if applied.anything() => Note::Partly(e),
+                    Some(e) => Note::Failed(e),
+                };
+                if editing && let Some(editor) = &mut self.editor {
+                    if applied.cover {
+                        editor.cover = None;
+                        editor.preview = None;
                     }
-                    Err(e) => {
-                        row.note = Some(Err(e.clone()));
-                        if editing && let Some(editor) = &mut self.editor {
-                            editor.error = Some(e.reason);
+                    match &note {
+                        Note::Saved => self.editor = None,
+                        Note::Partly(e) => {
+                            editor.error = Some(format!("PARTLY SAVED — {}", e.reason))
                         }
+                        Note::Failed(e) => editor.error = Some(e.reason.clone()),
                     }
                 }
+                row.note = Some(note);
             }
             Reply::Preview { id, path, image } => {
                 let Some(editor) = self.editor.as_mut().filter(|e| e.id == id) else {
@@ -380,8 +500,12 @@ impl State {
                 };
                 editor.checking = false;
                 match image {
-                    Ok(image) => {
-                        editor.preview = Some(upload(id, image));
+                    Ok(thumb) => {
+                        editor.preview = Some(ctx.load_texture(
+                            format!("import-preview-{id}"),
+                            thumb.image,
+                            egui::TextureOptions::LINEAR,
+                        ));
                         editor.cover = Some(path);
                     }
                     Err(e) => editor.error = Some(e.reason),
@@ -404,11 +528,14 @@ impl State {
         let Some(row) = self.rows.iter().find(|r| r.id == id) else {
             return;
         };
+        if row.editable() != Some(Ok(())) {
+            return;
+        }
         let fields = row.fields.clone().unwrap_or_default();
         self.editor = Some(Editor::new(id, &fields));
     }
 
-    /// `SAVE`: check the inputs and send what changed to the worker.
+    /// `SAVE`: check the inputs and send exactly what the user changed to the worker.
     fn save(&mut self, ctx: &egui::Context) {
         let State {
             rows,
@@ -432,12 +559,18 @@ impl State {
             ed.error = Some("A SAMPLE ROW — NOTHING TO SAVE TO".to_string());
             return;
         }
+        if let Some(Err(why)) = row.editable() {
+            ed.error = Some(why.to_string());
+            return;
+        }
         let Some(placed) = row.placed.clone() else {
             ed.error = Some("NOT IMPORTED YET".to_string());
             return;
         };
-        let changed = row.fields.as_ref() != Some(&fields);
-        if !changed && ed.cover.is_none() {
+        // Against what the editor was showing — fallbacks included — so a field the user
+        // left alone is never written, however it was filled in.
+        let changed = row.fields.clone().unwrap_or_default().diff(&fields);
+        if changed.is_empty() && ed.cover.is_none() {
             *editor = None;
             return;
         }
@@ -445,8 +578,11 @@ impl State {
             id: row.id,
             placed,
             root: row.root.clone(),
-            fields: changed.then(|| fields.clone()),
-            cover: ed.cover.clone(),
+            edit: Box::new(Edit {
+                fields: fields.clone(),
+                changed,
+                cover: ed.cover.clone(),
+            }),
         };
         if worker.send(ctx, job) {
             *jobs += 1;
@@ -459,7 +595,8 @@ impl State {
     }
 
     /// `CLEAR`: forget the rows that are done. Rows still in flight stay, so no reply
-    /// ever arrives for a row the user can no longer see.
+    /// ever arrives for a row the user can no longer see. The sources stay *listed*: a
+    /// cleared import dropped again is still a duplicate.
     fn clear_finished(&mut self) {
         self.rows.retain(|r| {
             r.saving.is_some() || matches!(r.status, Status::Queued | Status::Importing)
@@ -469,6 +606,16 @@ impl State {
         {
             self.editor = None;
         }
+        let shown: HashSet<egui::TextureId> = self
+            .rows
+            .iter()
+            .filter_map(|r| match &r.thumb {
+                Thumb::Image(texture) => Some(texture.id()),
+                _ => None,
+            })
+            .collect();
+        self.textures
+            .retain(|_, texture| shown.contains(&texture.id()));
         self.notice = None;
     }
 
@@ -490,12 +637,32 @@ impl State {
             })
     }
 
+    /// What is hovering over the window, sorted by what letting go would do.
+    ///
+    /// Telling a folder from a file takes a `stat`, so it is done once when the hovered set
+    /// changes — at the start of a drag — and remembered while the drag stays the same.
+    fn hover(&mut self, ctx: &egui::Context) -> Hover {
+        let key: Vec<Option<PathBuf>> = ctx.input(|i| {
+            i.raw
+                .hovered_files
+                .iter()
+                .take(HOVER_PROBE)
+                .map(|f| f.path.clone())
+                .collect()
+        });
+        if key != self.hover_key {
+            self.hover = Hover::of(&key);
+            self.hover_key = key;
+        }
+        self.hover
+    }
+
     /// Fill the list with sample rows built from `library`, one of each status, with the
     /// editor open on the first — the `--shot` tour's `import.png`. Nothing is sent to the
     /// worker, and `SAVE` refuses sample rows.
     pub fn seed_demo(&mut self, library: &Library) {
         let statuses = [
-            (Status::Imported, Some(Ok(()))),
+            (Status::Imported, Some(Note::Saved)),
             (Status::Imported, None),
             (
                 Status::Failed(Failure::new(
@@ -599,32 +766,35 @@ struct Hover {
 }
 
 impl Hover {
-    fn read(ctx: &egui::Context) -> Hover {
-        ctx.input(|i| {
-            let mut hover = Hover::default();
-            for file in i.raw.hovered_files.iter().take(HOVER_PROBE) {
-                match file.path.as_deref() {
-                    Some(path) if !path.is_dir() && import::kind_of(path) == Kind::Image => {
-                        hover.images += 1;
-                    }
-                    Some(path) if !path.is_dir() && import::kind_of(path) == Kind::Other => {}
-                    _ => hover.imports += 1,
+    /// Sort hovered paths. An unknown path counts as an import: better to light up for a
+    /// drop that turns out empty than to stay dark for one that works.
+    fn of(paths: &[Option<PathBuf>]) -> Hover {
+        let mut hover = Hover::default();
+        for path in paths {
+            match path.as_deref() {
+                Some(path) if !path.is_dir() && import::kind_of(path) == Kind::Image => {
+                    hover.images += 1;
                 }
+                Some(path) if !path.is_dir() && import::kind_of(path) == Kind::Other => {}
+                _ => hover.imports += 1,
             }
-            hover
-        })
+        }
+        hover
     }
 }
 
 /// Draw the view.
 pub fn show(ui: &mut Ui, cx: &mut Ctx, st: &mut State) {
-    let hover = Hover::read(ui.ctx());
+    let hover = st.hover(ui.ctx());
     views::page(ui, |ui| {
         views::heading(ui, "IMPORT");
-        views::subheading(ui, &mode_line(&st.root, st.scanning));
+        views::subheading(ui, &mode_line(&st.root, st.mode, st.scanning));
         ui.add_space(theme::CARD_TEXT_GAP * 1.5);
         drop_zone(ui, st.editor.is_some(), hover);
-        if let Some(notice) = &st.notice {
+        if st.walking > 0 {
+            ui.add_space(theme::CARD_TEXT_GAP);
+            views::subheading(ui, &widgets::spaced("LOOKING THROUGH THE DROP…"));
+        } else if let Some(notice) = &st.notice {
             ui.add_space(theme::CARD_TEXT_GAP);
             views::subheading(ui, notice);
         }
@@ -638,9 +808,9 @@ pub fn show(ui: &mut Ui, cx: &mut Ctx, st: &mut State) {
 }
 
 /// The line under the heading: where new songs go, and through what.
-fn mode_line(root: &Path, scanning: bool) -> String {
+fn mode_line(root: &Path, mode: Mode, scanning: bool) -> String {
     let shown = views::settings::display_path(root);
-    let mut line = match Mode::for_root(root) {
+    let mut line = match mode {
         Mode::MusicApp => format!("ADDED THROUGH THE MUSIC APP, WHICH FILES THEM IN {shown}"),
         Mode::Copy => format!("COPIED INTO {shown} AS ALBUM ARTIST / ALBUM / NN TITLE"),
     };
@@ -885,13 +1055,24 @@ fn status_line(row: &Row, spin: char) -> (&'static str, String, Tone, Option<Str
     if row.saving.is_some() {
         return ("", format!("SAVING {spin}"), Tone::Mid, None);
     }
-    if let Some(Err(e)) = &row.note {
-        return (
-            theme::GLYPH_WARNING,
-            format!("NOT SAVED: {}", e.reason),
-            Tone::Hi,
-            Some(e.detail.clone()),
-        );
+    match &row.note {
+        Some(Note::Failed(e)) => {
+            return (
+                theme::GLYPH_WARNING,
+                format!("NOT SAVED: {}", e.reason),
+                Tone::Hi,
+                Some(e.detail.clone()),
+            );
+        }
+        Some(Note::Partly(e)) => {
+            return (
+                theme::GLYPH_WARNING,
+                format!("PARTLY SAVED: {}", e.reason),
+                Tone::Hi,
+                Some(e.detail.clone()),
+            );
+        }
+        _ => {}
     }
     match &row.status {
         Status::Queued => ("", "QUEUED".into(), Tone::Low, None),
@@ -907,11 +1088,21 @@ fn status_line(row: &Row, spin: char) -> (&'static str, String, Tone, Option<Str
                     .into(),
             ),
         ),
-        Status::Imported if row.note.is_some() => {
+        Status::Imported if row.note == Some(Note::Saved) => {
             (theme::GLYPH_CHECK, "SAVED".into(), Tone::Mid, None)
         }
         Status::Imported => (theme::GLYPH_CHECK, "IMPORTED".into(), Tone::Mid, None),
         Status::AlreadyInLibrary => ("", "ALREADY IN LIBRARY".into(), Tone::Low, None),
+        Status::Uncertain(e) => (
+            theme::GLYPH_WARNING,
+            "UNKNOWN — CHECK MUSIC".into(),
+            Tone::Hi,
+            Some(format!(
+                "The Music app did not answer in time, and may still have added the song. \
+                 It will not be offered to Music again this session. ({})",
+                e.detail
+            )),
+        ),
         Status::Failed(e) => (
             theme::GLYPH_WARNING,
             e.reason.clone(),
@@ -1023,36 +1214,59 @@ fn row_ui(ui: &mut Ui, art: &mut Artwork, row: &Row, editing: bool, spin: char) 
     }
 
     let mut clicked = false;
-    // Sample rows follow the real rule: only something that was imported can be edited.
-    if row.placed.is_some() || (row.sample && row.status == Status::Imported) {
-        let response = ui.interact(
-            edit_rect,
-            ui.id().with(("import-edit", row.id)),
-            Sense::click(),
-        );
-        let color = if editing {
-            p.accent_text
-        } else {
-            theme::hover_color(response.hovered(), p.text_low, p.text_hi)
-        };
-        ui.painter().text(
-            edit_rect.center(),
-            Align2::CENTER_CENTER,
-            theme::GLYPH_RENAME,
-            theme::font_icon(theme::ICON_INLINE),
-            color,
-        );
-        clicked = response
-            .on_hover_text(
-                egui::RichText::new(if editing {
-                    "CLOSE"
-                } else {
-                    "EDIT FIELDS AND COVER"
-                })
-                .font(theme::font_small())
-                .color(p.text_mid),
+    match row.editable() {
+        None => {}
+        Some(Ok(())) => {
+            let response = ui.interact(
+                edit_rect,
+                ui.id().with(("import-edit", row.id)),
+                Sense::click(),
+            );
+            let color = if editing {
+                p.accent_text
+            } else {
+                theme::hover_color(response.hovered(), p.text_low, p.text_hi)
+            };
+            ui.painter().text(
+                edit_rect.center(),
+                Align2::CENTER_CENTER,
+                theme::GLYPH_RENAME,
+                theme::font_icon(theme::ICON_INLINE),
+                color,
+            );
+            clicked = response
+                .on_hover_text(
+                    egui::RichText::new(if editing {
+                        "CLOSE"
+                    } else {
+                        "EDIT FIELDS AND COVER"
+                    })
+                    .font(theme::font_small())
+                    .color(p.text_mid),
+                )
+                .clicked();
+        }
+        // Dead, like a disabled button: drawn in the border colour, senses no click, and
+        // says why.
+        Some(Err(why)) => {
+            ui.painter().text(
+                edit_rect.center(),
+                Align2::CENTER_CENTER,
+                theme::GLYPH_RENAME,
+                theme::font_icon(theme::ICON_INLINE),
+                p.border,
+            );
+            ui.interact(
+                edit_rect,
+                ui.id().with(("import-edit", row.id)),
+                Sense::hover(),
             )
-            .clicked();
+            .on_hover_text(
+                egui::RichText::new(why)
+                    .font(theme::font_small())
+                    .color(p.text_mid),
+            );
+        }
     }
     if !editing {
         widgets::hairline_bottom_from(ui, rect, text_x);
@@ -1317,27 +1531,21 @@ mod tests {
 
     #[test]
     fn the_mode_line_names_the_path_new_songs_take() {
-        let copy = mode_line(Path::new("/srv/music"), false);
+        let copy = mode_line(Path::new("/srv/music"), Mode::Copy, false);
         assert_eq!(
             copy,
             "COPIED INTO /srv/music AS ALBUM ARTIST / ALBUM / NN TITLE"
         );
-        let scanning = mode_line(Path::new("/srv/music"), true);
+        let scanning = mode_line(Path::new("/srv/music"), Mode::Copy, true);
         assert!(scanning.ends_with("RESCANNING THE LIBRARY…"));
-        let music = mode_line(
-            Path::new("/Users/x/Music/Music/Media.localized/Music"),
-            false,
-        );
-        if cfg!(target_os = "macos") {
-            assert!(music.starts_with("ADDED THROUGH THE MUSIC APP"), "{music}");
-        } else {
-            assert!(music.starts_with("COPIED INTO"), "{music}");
-        }
+        let music = mode_line(Path::new("/m/Media.localized/Music"), Mode::MusicApp, false);
+        assert!(music.starts_with("ADDED THROUGH THE MUSIC APP"), "{music}");
     }
 
     /// Drive the whole state machine against a temp root in copy mode, on the real
-    /// worker thread: a drop of a folder plus loose files, the rows it makes, the notice,
-    /// the rescan cue (exactly once), and an edit with a cover.
+    /// threads: a drop of a folder plus a file already in the library, walked off the UI
+    /// thread; the rows it makes, the notice, the rescan cue (exactly once), a re-drop
+    /// that adds nothing, and an edit with a cover.
     #[test]
     fn a_drop_imports_reports_and_asks_for_one_rescan() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1351,19 +1559,23 @@ mod tests {
         write_wav(&inside);
 
         let ctx = egui::Context::default();
-        let mut st = State {
-            root: root.clone(),
-            ..State::default()
-        };
+        let mut st = State::default();
+        st.set_root(root.clone());
         assert!(st.drop_paths(&ctx, &[album.clone(), inside.clone()]));
+        assert!(
+            st.rows.is_empty(),
+            "the walk is not done on the calling thread"
+        );
+        assert_eq!(st.walking, 1);
+
+        let rescans = settle(&ctx, &mut st);
+        assert_eq!(rescans, 1, "one rescan for the whole batch");
+        assert_eq!(st.walking, 0);
         assert_eq!(st.rows.len(), 3);
         assert_eq!(
             st.notice.as_deref(),
             Some("SKIPPED 1 FILE THAT IS NOT AUDIO: notes.txt")
         );
-
-        let rescans = settle(&ctx, &mut st);
-        assert_eq!(rescans, 1, "one rescan for the whole batch");
         let statuses: Vec<&Status> = st.rows.iter().map(|r| &r.status).collect();
         assert_eq!(
             statuses,
@@ -1380,6 +1592,7 @@ mod tests {
 
         // The same folder again: nothing new, and the list says why.
         assert!(st.drop_paths(&ctx, std::slice::from_ref(&album)));
+        assert_eq!(settle(&ctx, &mut st), 0, "nothing landed, no rescan");
         assert_eq!(st.rows.len(), 3);
         assert!(
             st.notice
@@ -1387,7 +1600,7 @@ mod tests {
                 .is_some_and(|n| n.starts_with("2 ALREADY IN THIS LIST"))
         );
 
-        // Edit the first imported row: new fields, and a cover dropped on the editor.
+        // Edit the first imported row: two fields, and a cover dropped on the editor.
         let id = st.rows[0].id;
         st.toggle_editor(id);
         let cover = dir.path().join("cover.png");
@@ -1406,19 +1619,25 @@ mod tests {
         assert_eq!(settle(&ctx, &mut st), 1, "an edit is a library change too");
         assert!(st.editor.is_none(), "a saved editor closes");
         let row = &st.rows[0];
-        assert_eq!(row.note, Some(Ok(())));
+        assert_eq!(row.note, Some(Note::Saved));
         assert!(matches!(row.thumb, Thumb::Image(_)));
         let moved = row
             .placed
             .as_ref()
             .and_then(|p| p.location.clone())
             .expect("location");
+        // The album artist was a fallback the user never touched, so it was not written:
+        // the file is filed under the artist it now has, by the scanner's own rule.
         assert_eq!(moved, root.join("HOME/Odyssey/01 One.wav"));
         assert!(import::embedded_picture(&moved).is_some());
 
-        // CLEAR forgets what is finished.
+        // CLEAR forgets what is finished — and its textures — but not what was imported:
+        // dropping the folder again is still a duplicate.
         st.clear_finished();
-        assert!(st.rows.is_empty() && st.notice.is_none());
+        assert!(st.rows.is_empty() && st.notice.is_none() && st.textures.is_empty());
+        st.drop_paths(&ctx, std::slice::from_ref(&album));
+        settle(&ctx, &mut st);
+        assert!(st.rows.is_empty());
     }
 
     #[test]
@@ -1429,13 +1648,200 @@ mod tests {
         let ctx = egui::Context::default();
         let mut st = State::default();
         assert!(st.drop_paths(&ctx, &[cover]));
+        settle(&ctx, &mut st);
         assert!(st.rows.is_empty());
         assert!(
             st.notice
                 .as_deref()
                 .is_some_and(|n| n.contains("OPEN A SONG"))
         );
-        assert_eq!(st.jobs, 0, "nothing was sent");
+    }
+
+    /// A bare imported row, for driving replies by hand.
+    fn imported_row(st: &mut State, src: &Path, placed: Option<Placed>) -> RowId {
+        let id = st.next_id;
+        st.next_id += 1;
+        st.listed.insert(src.to_path_buf());
+        st.rows.push(Row {
+            id,
+            src: src.to_path_buf(),
+            root: PathBuf::from("/lib"),
+            fields: Some(Fields {
+                title: "One".into(),
+                artist: "Guest".into(),
+                album_artist: "Guest".into(),
+                ..Fields::default()
+            }),
+            status: Status::Queued,
+            placed,
+            thumb: Thumb::None,
+            outside: false,
+            saving: None,
+            note: None,
+            sample: false,
+        });
+        id
+    }
+
+    /// A timed-out add may have landed in Music: the row says so, the library rescans,
+    /// and dropping the file again does not offer it to Music a second time. A failure,
+    /// by contrast, can be retried.
+    #[test]
+    fn an_add_of_unknown_fate_is_never_offered_twice() {
+        let ctx = egui::Context::default();
+        let mut st = State::default();
+        let src = PathBuf::from("/nonexistent/phoebus/song.m4a");
+        let id = imported_row(&mut st, &src, None);
+        st.apply(
+            &ctx,
+            Reply::Imported {
+                id,
+                outcome: Ok(Outcome::Uncertain(Failure::new(
+                    music_did_not_answer(),
+                    "(-1712)",
+                ))),
+            },
+        );
+        assert!(matches!(st.rows[0].status, Status::Uncertain(_)));
+        assert_eq!(status_line(&st.rows[0], '|').1, "UNKNOWN — CHECK MUSIC");
+        assert!(st.dirty, "it may be in the library: rescan");
+        st.sorted(
+            &ctx,
+            Dropped {
+                audio: vec![src.clone()],
+                ..Dropped::default()
+            },
+        );
+        assert_eq!(st.rows.len(), 1, "not queued again");
+        assert_eq!(st.notice.as_deref(), Some("1 ALREADY IN THIS LIST"));
+
+        // A plain failure leaves the list, so the same file can be tried again.
+        let other = PathBuf::from("/nonexistent/phoebus/other.m4a");
+        let id = imported_row(&mut st, &other, None);
+        st.apply(
+            &ctx,
+            Reply::Imported {
+                id,
+                outcome: Err(Failure::new("MUSIC APP REFUSED", "")),
+            },
+        );
+        assert!(!st.listed.contains(&other));
+    }
+
+    fn music_did_not_answer() -> &'static str {
+        import::music_app::DID_NOT_ANSWER
+    }
+
+    /// A song the Music app did not copy points at the user's own file: `✎` is dead and
+    /// says why, the editor will not open, and `SAVE` would refuse anyway.
+    #[test]
+    fn a_song_music_did_not_copy_cannot_be_edited() {
+        let mut st = State::default();
+        let placed = Placed {
+            mode: Mode::MusicApp,
+            location: Some(PathBuf::from("/Users/x/Downloads/song.m4a")),
+            music_id: Some("0123456789ABCDEF".into()),
+        };
+        let id = imported_row(
+            &mut st,
+            Path::new("/Users/x/Downloads/song.m4a"),
+            Some(placed),
+        );
+        st.rows[0].status = Status::Imported;
+        st.rows[0].outside = true;
+        assert_eq!(st.rows[0].editable(), Some(Err(ORIGINAL_TIP)));
+        st.toggle_editor(id);
+        assert!(st.editor.is_none());
+        // Even an editor opened before the fact cannot save.
+        st.editor = Some(Editor::new(id, &Fields::default()));
+        if let Some(ed) = &mut st.editor {
+            ed.title = "Changed".into();
+        }
+        st.save(&egui::Context::default());
+        assert_eq!(st.jobs, 0);
+        assert_eq!(
+            st.editor.as_ref().and_then(|e| e.error.as_deref()),
+            Some(ORIGINAL_TIP)
+        );
+    }
+
+    /// Fields written, cover refused: the row keeps the new fields, says it is only partly
+    /// saved, and still asks for the rescan.
+    #[test]
+    fn a_partial_edit_keeps_what_landed_and_rescans() {
+        let ctx = egui::Context::default();
+        let mut st = State::default();
+        let placed = Placed {
+            mode: Mode::Copy,
+            location: Some(PathBuf::from("/lib/Guest/One.wav")),
+            music_id: None,
+        };
+        let id = imported_row(&mut st, Path::new("/in/one.wav"), Some(placed.clone()));
+        st.rows[0].status = Status::Imported;
+        st.toggle_editor(id);
+        let new = Fields {
+            title: "Uno".into(),
+            ..st.rows[0].fields.clone().unwrap_or_default()
+        };
+        st.rows[0].saving = Some(new.clone());
+        st.apply(
+            &ctx,
+            Reply::Edited {
+                id,
+                applied: import::Applied {
+                    placed,
+                    fields: true,
+                    cover: false,
+                    failure: Some(Failure::new("NOT A PNG OR JPEG", "x.gif")),
+                },
+                thumb: None,
+            },
+        );
+        let row = &st.rows[0];
+        assert_eq!(row.fields.as_ref(), Some(&new));
+        assert_eq!(
+            row.note,
+            Some(Note::Partly(Failure::new("NOT A PNG OR JPEG", "x.gif")))
+        );
+        assert_eq!(status_line(row, '|').1, "PARTLY SAVED: NOT A PNG OR JPEG");
+        assert!(st.dirty);
+        assert_eq!(
+            st.editor.as_ref().and_then(|e| e.error.as_deref()),
+            Some("PARTLY SAVED — NOT A PNG OR JPEG"),
+            "the editor stays open on what is left"
+        );
+    }
+
+    /// An album's tracks share their artwork: one texture for all of them.
+    #[test]
+    fn identical_covers_share_one_texture() {
+        let ctx = egui::Context::default();
+        let mut st = State::default();
+        let image = crate::importer::thumbnail(&png()).expect("decodes");
+        let thumb = crate::importer::Thumb { cover: 7, image };
+        let a = imported_row(&mut st, Path::new("/in/a.wav"), None);
+        let b = imported_row(&mut st, Path::new("/in/b.wav"), None);
+        for id in [a, b] {
+            st.apply(
+                &ctx,
+                Reply::Read {
+                    id,
+                    fields: Ok(Fields::default()),
+                    thumb: Some(thumb.clone()),
+                },
+            );
+        }
+        assert_eq!(st.textures.len(), 1);
+        let ids: Vec<_> = st
+            .rows
+            .iter()
+            .filter_map(|r| match &r.thumb {
+                Thumb::Image(t) => Some(t.id()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids[0], ids[1]);
     }
 
     #[test]
@@ -1484,38 +1890,50 @@ mod tests {
         assert_eq!(status_line(row, '/').1, "SAVING /");
     }
 
-    /// Hovered files light the field, or the editor's cover, by what they are.
+    /// Hovered files light the field, or the editor's cover, by what they are — and the
+    /// folder check behind that runs once per drag, not once per frame.
     #[test]
     fn hovering_is_sorted_by_what_would_happen() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let folder = dir.path().join("Album");
+        let folder = dir.path().join("Album.Vol.2");
         fs::create_dir_all(&folder).expect("mkdir");
-        let read = |paths: &[&Path]| {
-            let ctx = egui::Context::default();
-            let input = egui::RawInput {
-                hovered_files: paths
-                    .iter()
-                    .map(|p| egui::HoveredFile {
-                        path: Some(p.to_path_buf()),
-                        ..Default::default()
-                    })
-                    .collect(),
-                ..Default::default()
-            };
-            let mut hover = Hover::default();
-            let mut out = ctx.run_ui(input, |ui| hover = Hover::read(ui.ctx()));
-            // API-FACTS §3.7: dropping unapplied texture deltas panics.
-            out.textures_delta.clear();
-            hover
+        let paths = |ps: &[&Path]| -> Vec<Option<PathBuf>> {
+            ps.iter().map(|p| Some(p.to_path_buf())).collect()
         };
         assert_eq!(
-            read(&[&folder, Path::new("/x/a.mp3"), Path::new("/x/c.jpg")]),
+            Hover::of(&paths(&[
+                &folder,
+                Path::new("/x/a.mp3"),
+                Path::new("/x/c.jpg")
+            ])),
             Hover {
                 imports: 2,
                 images: 1
             }
         );
-        assert_eq!(read(&[Path::new("/x/readme.md")]), Hover::default());
+        assert_eq!(
+            Hover::of(&paths(&[Path::new("/x/readme.md")])),
+            Hover::default()
+        );
+
+        // Through the state: the answer is cached against the hovered set.
+        let ctx = egui::Context::default();
+        let mut st = State::default();
+        let input = egui::RawInput {
+            hovered_files: vec![egui::HoveredFile {
+                path: Some(folder.clone()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            let mut out = ctx.run_ui(input.clone(), |ui| {
+                assert_eq!(st.hover(ui.ctx()).imports, 1);
+            });
+            // API-FACTS §3.7: dropping unapplied texture deltas panics.
+            out.textures_delta.clear();
+        }
+        assert_eq!(st.hover_key, paths(&[&folder]));
     }
 
     /// Poll until every job has answered; return how many times `poll` asked for a rescan.

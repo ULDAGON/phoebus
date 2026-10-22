@@ -1,35 +1,60 @@
-//! The import worker: one background thread that does everything an import or an edit
-//! blocks on — reading tags, decoding cover thumbnails, copying files, and waiting on the
-//! Music app — so no frame ever does.
+//! The import worker: everything an import or an edit blocks on — walking dropped folders,
+//! reading tags, decoding cover thumbnails, copying files, waiting on the Music app — runs
+//! here, so no frame ever does.
 //!
-//! The thread is started on the first job, not with the app: most runs never import
-//! anything, and the headless render tests build a [`crate::views::ViewState`] by the dozen.
+//! Two kinds of thread:
 //!
-//! Jobs run one at a time, in order. That is not only simple, it is required: the Music app
-//! handles one `add` at a time anyway, and two edits of the same song must land in the order
-//! they were saved. A drop of a whole album is still quick to *show*, because the worker
-//! takes every job that is already waiting as one batch and reads all of their tags before
-//! it imports the first file ([`work`]) — the list fills in with titles and covers at once,
-//! then the statuses tick over one by one.
+//! * **The worker**, one, started on the first job rather than with the app (most runs
+//!   never import anything, and the headless render tests build a
+//!   [`crate::views::ViewState`] by the dozen). Imports and edits run on it one at a time,
+//!   in order. That is required, not just simple: the Music app handles one `add` at a time
+//!   anyway, and two edits of the same song must land in the order they were saved. A drop
+//!   of a whole album is still quick to *show*, because the worker takes every job already
+//!   waiting as one batch and reads all of their tags before it imports the first file
+//!   ([`work`]) — the list fills in with titles and covers at once, then the statuses tick
+//!   over one by one.
+//! * **Side jobs** ([`SideJob`]), one short-lived thread each: walking a drop and checking
+//!   a dropped cover image. Neither touches the library, so neither has to queue behind an
+//!   import that may be waiting minutes on the Music app.
 //!
-//! Every reply wakes the UI (`request_repaint`), which is what keeps the list moving even
-//! while nothing else is animating, and what lets a hidden window's `logic` pass collect a
-//! finished import and start the rescan.
+//! Every reply wakes the UI (`request_repaint`), which keeps the list moving while nothing
+//! else animates, and lets a hidden window's `logic` pass collect a finished import and
+//! start the rescan.
+//!
+//! Covers are decoded once per distinct picture ([`Covers`]): the twelve tracks of an album
+//! carry the same artwork, and they share one thumbnail here and one texture in the view.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use crossbeam_channel::{Receiver, Sender};
-use phoebus_core::import::{self, Failure, Fields, Mode, Outcome, Placed};
+use phoebus_core::import::{self, Applied, Dropped, Edit, Failure, Fields, Mode, Outcome, Placed};
 
 /// Longest edge of a decoded thumbnail. Twice the editor's cover, so it stays sharp there
 /// and on a 2× display in the row.
 pub const THUMB_EDGE: u32 = 240;
 
+/// How many distinct decoded covers the worker remembers before it starts over. A cover is
+/// up to `THUMB_EDGE`² RGBA, about 230 kB, so this bounds the cache near 60 MB.
+const COVERS_CAP: usize = 256;
+
 /// Identifies one row of the import list for the life of the session.
 pub type RowId = u64;
 
-/// Something for the worker to do.
+/// Identifies one distinct cover picture: a hash of its encoded bytes.
+pub type CoverId = u64;
+
+/// A decoded, shrunk cover and the picture it came from.
+#[derive(Clone)]
+pub struct Thumb {
+    /// Which picture — equal for every track that embeds the same artwork.
+    pub cover: CoverId,
+    /// The pixels.
+    pub image: Arc<egui::ColorImage>,
+}
+
+/// Something for the worker to do, in order.
 pub enum Job {
     /// Read `src`, then import it into `root` by `mode`.
     Import {
@@ -42,7 +67,7 @@ pub enum Job {
         /// How the root takes new songs.
         mode: Mode,
     },
-    /// Apply new fields and/or a new cover to a song imported earlier.
+    /// Apply an edit to a song imported earlier.
     Edit {
         /// The row this belongs to.
         id: RowId,
@@ -50,12 +75,19 @@ pub enum Job {
         placed: Placed,
         /// The library root, for re-filing a copy.
         root: PathBuf,
-        /// New fields, if any changed.
-        fields: Option<Fields>,
-        /// A new cover image, if one was dropped.
-        cover: Option<PathBuf>,
+        /// What to change. Boxed: seven fields are most of the enum's size otherwise.
+        edit: Box<Edit>,
     },
-    /// Check and decode an image the user dropped on the editor, for its preview.
+}
+
+/// Something quick and independent of the library, run on a thread of its own.
+pub enum SideJob {
+    /// Walk a drop ([`import::sort_drop`]). Folders can be large, or on a network share.
+    Sort {
+        /// What was dropped.
+        paths: Vec<PathBuf>,
+    },
+    /// Check and decode an image dropped on the editor, for its preview.
     Preview {
         /// The row whose editor it was dropped on.
         id: RowId,
@@ -64,16 +96,21 @@ pub enum Job {
     },
 }
 
-/// What the worker reports back, in the order things happen.
+/// What comes back.
 pub enum Reply {
+    /// A drop, walked and sorted.
+    Sorted {
+        /// What it held.
+        dropped: Dropped,
+    },
     /// The tags of a queued file (or why it is not audio), and its embedded cover.
     Read {
         /// The row.
         id: RowId,
         /// The file's fields, or the reason it cannot be imported.
         fields: Result<Fields, Failure>,
-        /// The embedded cover, decoded and shrunk.
-        thumb: Option<Arc<egui::ColorImage>>,
+        /// The embedded cover.
+        thumb: Option<Thumb>,
     },
     /// The worker has started on this row's job.
     Started {
@@ -87,14 +124,14 @@ pub enum Reply {
         /// What happened.
         outcome: Result<Outcome, Failure>,
     },
-    /// An edit finished.
+    /// An edit finished — wholly, partly, or not at all.
     Edited {
         /// The row.
         id: RowId,
-        /// Where the song is now, or why the edit failed.
-        result: Result<Placed, Failure>,
-        /// The new cover's thumbnail, when the edit set one.
-        thumb: Option<Arc<egui::ColorImage>>,
+        /// What landed and what did not.
+        applied: Applied,
+        /// The new cover, when the edit set one.
+        thumb: Option<Thumb>,
     },
     /// A dropped cover image, checked and decoded — or why it cannot be a cover.
     Preview {
@@ -103,21 +140,25 @@ pub enum Reply {
         /// The image file.
         path: PathBuf,
         /// The thumbnail, or the reason.
-        image: Result<Arc<egui::ColorImage>, Failure>,
+        image: Result<Thumb, Failure>,
     },
 }
 
 impl Reply {
-    /// True for the replies that end a job (and so balance one [`Worker::send`]).
+    /// True for the replies that end a job (and so balance one [`Worker::send`] or
+    /// [`Worker::side`]).
     pub fn ends_a_job(&self) -> bool {
         matches!(
             self,
-            Reply::Imported { .. } | Reply::Edited { .. } | Reply::Preview { .. }
+            Reply::Sorted { .. }
+                | Reply::Imported { .. }
+                | Reply::Edited { .. }
+                | Reply::Preview { .. }
         )
     }
 }
 
-/// The UI's handle on the worker thread.
+/// The UI's handle on the worker.
 pub struct Worker {
     jobs: Option<Sender<Job>>,
     replies_tx: Sender<Reply>,
@@ -159,9 +200,59 @@ impl Worker {
         self.jobs.as_ref().is_some_and(|tx| tx.send(job).is_ok())
     }
 
+    /// Run a side job on a thread of its own. `false` if the thread could not be started.
+    pub fn side(&self, ctx: &egui::Context, job: SideJob) -> bool {
+        let replies = self.replies_tx.clone();
+        let ctx = ctx.clone();
+        std::thread::Builder::new()
+            .name("phoebus-import-side".to_string())
+            .spawn(move || {
+                let reply = match job {
+                    SideJob::Sort { paths } => Reply::Sorted {
+                        dropped: import::sort_drop(&paths),
+                    },
+                    SideJob::Preview { id, path } => {
+                        let image = import::read_cover(&path).and_then(|(bytes, _)| {
+                            Covers::default()
+                                .get(&bytes)
+                                .ok_or_else(|| Failure::new("IMAGE DOES NOT DECODE", ""))
+                        });
+                        Reply::Preview { id, path, image }
+                    }
+                };
+                let _ = replies.send(reply);
+                ctx.request_repaint();
+            })
+            .map_err(|e| log::error!("import: could not start a side thread: {e}"))
+            .is_ok()
+    }
+
     /// Every reply that has arrived since the last call.
     pub fn replies(&self) -> impl Iterator<Item = Reply> + '_ {
         self.replies.try_iter()
+    }
+}
+
+/// Decoded covers by picture, so an album's worth of identical artwork is decoded once.
+#[derive(Default)]
+struct Covers(HashMap<CoverId, Arc<egui::ColorImage>>);
+
+impl Covers {
+    /// The thumbnail of the encoded picture `bytes`, decoded only if it is new.
+    fn get(&mut self, bytes: &[u8]) -> Option<Thumb> {
+        let cover = phoebus_core::fnv1a_64(bytes);
+        if let Some(image) = self.0.get(&cover) {
+            return Some(Thumb {
+                cover,
+                image: Arc::clone(image),
+            });
+        }
+        let image = thumbnail(bytes)?;
+        if self.0.len() >= COVERS_CAP {
+            self.0.clear();
+        }
+        self.0.insert(cover, Arc::clone(&image));
+        Some(Thumb { cover, image })
     }
 }
 
@@ -173,6 +264,7 @@ fn work(jobs: &Receiver<Job>, replies: &Sender<Reply>, ctx: &egui::Context) {
         ctx.request_repaint();
         ok
     };
+    let mut covers = Covers::default();
     while let Ok(first) = jobs.recv() {
         let mut batch: Vec<Job> = vec![first];
         batch.extend(jobs.try_iter());
@@ -190,7 +282,7 @@ fn work(jobs: &Receiver<Job>, replies: &Sender<Reply>, ctx: &egui::Context) {
                 .is_ok()
                 .then(|| import::embedded_picture(src))
                 .flatten()
-                .and_then(|bytes| thumbnail(&bytes));
+                .and_then(|bytes| covers.get(&bytes));
             read.push(fields.as_ref().ok().cloned());
             if !send(Reply::Read {
                 id: *id,
@@ -229,6 +321,9 @@ fn work(jobs: &Receiver<Job>, replies: &Sender<Reply>, ctx: &egui::Context) {
                         Ok(Outcome::AlreadyInLibrary) => {
                             log::info!("import: {} is already in the library", src.display());
                         }
+                        Ok(Outcome::Uncertain(e)) => {
+                            log::warn!("import: {}: no answer in time: {e}", src.display());
+                        }
                         Err(e) => log::warn!("import: {}: {e}", src.display()),
                     }
                     Reply::Imported { id, outcome }
@@ -237,25 +332,18 @@ fn work(jobs: &Receiver<Job>, replies: &Sender<Reply>, ctx: &egui::Context) {
                     id,
                     placed,
                     root,
-                    fields,
-                    cover,
+                    edit,
                 } => {
                     send(Reply::Started { id });
-                    let result = import::apply(&placed, &root, fields.as_ref(), cover.as_deref());
-                    if let Err(e) = &result {
-                        log::warn!("import: edit failed: {e}");
+                    let applied = import::apply(&placed, &root, &edit);
+                    if let Some(e) = &applied.failure {
+                        log::warn!("import: edit stopped: {e}");
                     }
-                    let thumb = match (&result, &cover) {
-                        (Ok(_), Some(path)) => std::fs::read(path).ok().and_then(|b| thumbnail(&b)),
+                    let thumb = match (&edit.cover, applied.cover) {
+                        (Some(path), true) => std::fs::read(path).ok().and_then(|b| covers.get(&b)),
                         _ => None,
                     };
-                    Reply::Edited { id, result, thumb }
-                }
-                Job::Preview { id, path } => {
-                    let image = import::read_cover(&path).and_then(|(bytes, _)| {
-                        thumbnail(&bytes).ok_or_else(|| Failure::new("IMAGE DOES NOT DECODE", ""))
-                    });
-                    Reply::Preview { id, path, image }
+                    Reply::Edited { id, applied, thumb }
                 }
             };
             if !send(reply) {
@@ -329,6 +417,42 @@ pub(crate) mod tests {
         let small = thumbnail(&png(10)).expect("decodes");
         assert_eq!(small.size, [10, 10], "never blown up");
         assert!(thumbnail(b"not an image").is_none());
+    }
+
+    /// The same artwork in twelve files is decoded once: the second ask hands back the
+    /// very same pixels, under the same cover id.
+    #[test]
+    fn identical_artwork_is_decoded_once() {
+        let mut covers = Covers::default();
+        let a = covers.get(&png(64)).expect("decodes");
+        let b = covers.get(&png(64)).expect("decodes");
+        assert_eq!(a.cover, b.cover);
+        assert!(Arc::ptr_eq(&a.image, &b.image));
+        let c = covers.get(&png(32)).expect("decodes");
+        assert_ne!(a.cover, c.cover);
+        assert_eq!(covers.0.len(), 2);
+    }
+
+    /// A drop is walked on a side thread and comes back sorted.
+    #[test]
+    fn a_drop_is_walked_off_the_calling_thread() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_wav(&dir.path().join("Album/01 A.wav"));
+        std::fs::write(dir.path().join("Album/notes.txt"), b"x").expect("write");
+        let ctx = egui::Context::default();
+        let worker = Worker::default();
+        assert!(worker.side(
+            &ctx,
+            SideJob::Sort {
+                paths: vec![dir.path().join("Album")],
+            },
+        ));
+        let replies = collect(&worker, 1);
+        let Some(Reply::Sorted { dropped }) = replies.into_iter().next() else {
+            panic!("no sorted reply");
+        };
+        assert_eq!(dropped.audio, vec![dir.path().join("Album/01 A.wav")]);
+        assert_eq!(dropped.skipped, vec![dir.path().join("Album/notes.txt")]);
     }
 
     /// Wait for replies until `n` jobs have ended (or give up after a few seconds).

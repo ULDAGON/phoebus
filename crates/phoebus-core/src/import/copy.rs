@@ -24,7 +24,7 @@ use lofty::prelude::{Accessor, ItemKey};
 use lofty::tag::Tag;
 use lofty::tag::items::Timestamp;
 
-use super::{Failure, Fields, ImageKind};
+use super::{Failure, Field, Fields, ImageKind};
 use crate::model::UNKNOWN_TITLE;
 
 /// Longest file or folder name written, in bytes. Every file system Phoebus runs on allows
@@ -152,30 +152,38 @@ pub fn place(root: &Path, src: &Path, fields: &Fields) -> Result<PathBuf, Failur
     ))
 }
 
-/// Write `fields` into the tags of `path` (the library copy), creating the file format's
-/// primary tag if it has none. An empty string or a `None` removes the item.
-pub fn write_fields(path: &Path, fields: &Fields) -> Result<(), Failure> {
+/// Write the `changed` items of `fields` into the tags of `path` (the library copy),
+/// creating the file format's primary tag if it has none. Everything else in the tag is
+/// left exactly as it was. An empty string or a `None` removes the item.
+pub fn write_fields(path: &Path, fields: &Fields, changed: &[Field]) -> Result<(), Failure> {
     edit_tag(path, |tag| {
-        set_text(tag, ItemKey::TrackTitle, &fields.title);
-        set_text(tag, ItemKey::TrackArtist, &fields.artist);
-        set_text(tag, ItemKey::AlbumTitle, &fields.album);
-        set_text(tag, ItemKey::AlbumArtist, &fields.album_artist);
-        set_text(tag, ItemKey::Genre, &fields.genre);
-        // Formats keep the year under different keys; the scanner reads `date` first, so
-        // a stale `Year`/`RecordingDate` beside a fresh date would be harmless — but a
-        // cleared year must clear all of them, or the old value comes back on the next scan.
-        tag.remove_key(ItemKey::Year);
-        tag.remove_key(ItemKey::RecordingDate);
-        match fields.year.and_then(|y| u16::try_from(y).ok()) {
-            Some(year) => tag.set_date(Timestamp {
-                year,
-                ..Timestamp::default()
-            }),
-            None => tag.remove_date(),
-        }
-        match fields.track_no {
-            Some(n) => tag.set_track(n),
-            None => tag.remove_track(),
+        for field in changed {
+            match field {
+                Field::Title => set_text(tag, ItemKey::TrackTitle, &fields.title),
+                Field::Artist => set_text(tag, ItemKey::TrackArtist, &fields.artist),
+                Field::Album => set_text(tag, ItemKey::AlbumTitle, &fields.album),
+                Field::AlbumArtist => set_text(tag, ItemKey::AlbumArtist, &fields.album_artist),
+                Field::Genre => set_text(tag, ItemKey::Genre, &fields.genre),
+                Field::Year => {
+                    // Formats keep the year under different keys; the scanner reads `date`
+                    // first, so a stale `Year`/`RecordingDate` beside a fresh date would be
+                    // harmless — but a cleared year must clear all of them, or the old
+                    // value comes back on the next scan.
+                    tag.remove_key(ItemKey::Year);
+                    tag.remove_key(ItemKey::RecordingDate);
+                    match fields.year.and_then(|y| u16::try_from(y).ok()) {
+                        Some(year) => tag.set_date(Timestamp {
+                            year,
+                            ..Timestamp::default()
+                        }),
+                        None => tag.remove_date(),
+                    }
+                }
+                Field::TrackNo => match fields.track_no {
+                    Some(n) => tag.set_track(n),
+                    None => tag.remove_track(),
+                },
+            }
         }
     })
 }
@@ -236,9 +244,9 @@ fn set_text(tag: &mut Tag, key: ItemKey, value: &str) {
 /// After an edit: move the file to where its new fields say it belongs, and return where
 /// it is now. A no-op when the name is unchanged.
 ///
-/// The move claims the new name with `hard_link`, which fails rather than replaces, and
-/// only then drops the old name. The folders it leaves behind are removed if that made
-/// them empty — the album's and then the artist's, never the root.
+/// The move never replaces a file that is already there ([`move_exclusive`]). The folders
+/// it leaves behind are removed if that made them empty — the album's and then the
+/// artist's, never the root.
 pub fn refile(root: &Path, location: &Path, fields: &Fields) -> Result<PathBuf, Failure> {
     let wanted = target(root, fields, &ext_of(location));
     if wanted == location {
@@ -255,9 +263,8 @@ pub fn refile(root: &Path, location: &Path, fields: &Fields) -> Result<PathBuf, 
             fs::rename(location, &dest).map_err(fail)?;
             return Ok(dest);
         }
-        match fs::hard_link(location, &dest) {
+        match move_exclusive(location, &dest) {
             Ok(()) => {
-                fs::remove_file(location).map_err(fail)?;
                 prune(root, location);
                 return Ok(dest);
             }
@@ -269,6 +276,97 @@ pub fn refile(root: &Path, location: &Path, fields: &Fields) -> Result<PathBuf, 
         "NOT MOVED",
         format!("no free name for {}", wanted.display()),
     ))
+}
+
+/// Move `from` to `to`, failing with `AlreadyExists` rather than replacing anything.
+///
+/// Three ways, best first, each taken only when the one before is not supported:
+///
+/// 1. `hard_link` + `remove_file` — atomic on any POSIX volume, and the oldest call there
+///    is. FAT, exFAT and some SMB shares have no hard links and answer "not supported" or
+///    "not permitted".
+/// 2. An exclusive rename — `renamex_np(RENAME_EXCL)` on macOS, `renameat2(RENAME_NOREPLACE)`
+///    on Linux — atomic too, where the volume supports the flag.
+/// 3. Check, then rename. Not atomic: a file created in the instant between the two would
+///    be replaced. That window is a single `stat` wide, inside the library root, and only
+///    reached on volumes that offer neither of the above.
+fn move_exclusive(from: &Path, to: &Path) -> io::Result<()> {
+    move_exclusive_with(from, to, |a, b| fs::hard_link(a, b))
+}
+
+/// [`move_exclusive`] with the first step injectable, so the fallbacks can be tested on a
+/// volume that does have hard links.
+fn move_exclusive_with(
+    from: &Path,
+    to: &Path,
+    link: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    match link(from, to) {
+        Ok(()) => fs::remove_file(from),
+        Err(e) if not_supported(&e) => match rename_noreplace(from, to) {
+            Err(e) if not_supported(&e) => check_then_rename(from, to),
+            other => other,
+        },
+        Err(e) => Err(e),
+    }
+}
+
+/// True for the answers a volume gives to a call it cannot do at all, as opposed to one
+/// that failed: "not supported", "not permitted" (FAT's answer to `link`), "invalid" (an
+/// unknown rename flag) and "not implemented" (an old kernel).
+fn not_supported(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::Unsupported | io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidInput
+    ) || matches!(
+        e.raw_os_error(),
+        Some(libc::ENOTSUP | libc::EOPNOTSUPP | libc::EPERM | libc::EINVAL | libc::ENOSYS)
+    )
+}
+
+/// The platform's exclusive rename.
+fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let c = |p: &Path| {
+        CString::new(p.as_os_str().as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in a path"))
+    };
+    let (from_c, to_c) = (c(from)?, c(to)?);
+    #[cfg(target_os = "macos")]
+    // SAFETY: both pointers are valid NUL-terminated strings that outlive the call.
+    let rc = unsafe { libc::renamex_np(from_c.as_ptr(), to_c.as_ptr(), libc::RENAME_EXCL) };
+    #[cfg(target_os = "linux")]
+    // SAFETY: as above; `AT_FDCWD` makes both paths relative to the working directory,
+    // and they are absolute anyway.
+    let rc = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            from_c.as_ptr(),
+            libc::AT_FDCWD,
+            to_c.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let rc = {
+        let _ = (&from_c, &to_c);
+        return Err(io::Error::from(io::ErrorKind::Unsupported));
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// The last resort: refuse when anything — a file, a folder, a dangling link — is at `to`,
+/// otherwise rename.
+fn check_then_rename(from: &Path, to: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(to).is_ok() {
+        return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+    }
+    fs::rename(from, to)
 }
 
 /// True if both paths name the same existing file.
@@ -394,7 +492,7 @@ mod tests {
             title: "Resonance".into(),
             ..Fields::default()
         };
-        write_fields(&path, &cleared).expect("written");
+        write_fields(&path, &cleared, &Field::ALL).expect("written");
         let back = super::super::Fields::read(&path).expect("readable");
         assert_eq!(back.genre, "");
         assert_eq!(back.year, None);
@@ -455,6 +553,41 @@ mod tests {
         assert!(root.is_dir(), "the root itself is never pruned");
         // Refiling to the name it already has is a no-op.
         assert_eq!(refile(&root, &moved, &renamed).expect("no-op"), moved);
+    }
+
+    /// FAT and friends have no hard links: the move falls back to an exclusive rename, and
+    /// a taken name is still refused rather than replaced on every path.
+    #[test]
+    fn a_volume_without_hard_links_still_moves_without_overwriting() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let from = dir.path().join("a.wav");
+        let free = dir.path().join("b.wav");
+        let taken = dir.path().join("c.wav");
+        fs::write(&from, b"song").expect("write");
+        fs::write(&taken, b"other").expect("write");
+        let no_links = |_: &Path, _: &Path| -> io::Result<()> {
+            Err(io::Error::from(io::ErrorKind::Unsupported))
+        };
+
+        let err = move_exclusive_with(&from, &taken, no_links).expect_err("taken");
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&taken).expect("read"), b"other");
+        assert!(from.is_file());
+
+        move_exclusive_with(&from, &free, no_links).expect("moved");
+        assert!(!from.exists());
+        assert_eq!(fs::read(&free).expect("read"), b"song");
+
+        // The last resort on its own: same contract.
+        let err = check_then_rename(&free, &taken).expect_err("taken");
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        check_then_rename(&free, &from).expect("moved back");
+        assert_eq!(fs::read(&from).expect("read"), b"song");
+        // …and the platform call, directly.
+        let err = rename_noreplace(&from, &taken).expect_err("taken");
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        rename_noreplace(&from, &free).expect("moved");
+        assert!(free.is_file() && !from.exists());
     }
 
     #[test]

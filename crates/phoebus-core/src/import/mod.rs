@@ -15,7 +15,9 @@
 //!   edits into that copy's tags with `lofty` ([`copy`]).
 //!
 //! Either way the dropped original is never written to: an import copies, and every edit
-//! goes to the copy.
+//! goes to the copy. The one case where the Music app does *not* copy — its "Copy files to
+//! Music Media folder" setting is off, and the track points at the dropped file itself —
+//! is refused for edits ([`apply`]), because there an edit would rewrite the original.
 //!
 //! Everything here blocks (file copies, `osascript`), so the app calls it from a worker
 //! thread, never from a frame.
@@ -60,7 +62,60 @@ pub struct Fields {
     pub track_no: Option<u32>,
 }
 
+/// One of the seven editable fields — what an edit names when it says what changed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Field {
+    /// [`Fields::title`].
+    Title,
+    /// [`Fields::artist`].
+    Artist,
+    /// [`Fields::album`].
+    Album,
+    /// [`Fields::album_artist`].
+    AlbumArtist,
+    /// [`Fields::genre`].
+    Genre,
+    /// [`Fields::year`].
+    Year,
+    /// [`Fields::track_no`].
+    TrackNo,
+}
+
+impl Field {
+    /// Every field, in editor order.
+    pub const ALL: [Field; 7] = [
+        Field::Title,
+        Field::Artist,
+        Field::Album,
+        Field::AlbumArtist,
+        Field::Genre,
+        Field::Year,
+        Field::TrackNo,
+    ];
+}
+
 impl Fields {
+    /// The fields that differ between `self` and `new`.
+    ///
+    /// An edit writes exactly these and nothing else. [`Fields::read`] fills gaps with
+    /// fallbacks (album artist ← artist, title and track ← the file name) that were never
+    /// in the tags; writing them back unasked would, on a compilation, give one track an
+    /// album artist of its own and pull it out of its album in the Music app.
+    pub fn diff(&self, new: &Fields) -> Vec<Field> {
+        Field::ALL
+            .into_iter()
+            .filter(|field| match field {
+                Field::Title => self.title != new.title,
+                Field::Artist => self.artist != new.artist,
+                Field::Album => self.album != new.album,
+                Field::AlbumArtist => self.album_artist != new.album_artist,
+                Field::Genre => self.genre != new.genre,
+                Field::Year => self.year != new.year,
+                Field::TrackNo => self.track_no != new.track_no,
+            })
+            .collect()
+    }
+
     /// Read the fields of an audio file, with the scanner's fallbacks: album artist ←
     /// artist, title and track number ← the file name.
     ///
@@ -141,29 +196,56 @@ pub enum Mode {
 
 impl Mode {
     /// The mode for a library root on this platform.
+    ///
+    /// Blocking — it resolves the root on disk, and on macOS reads the Music app's
+    /// preferences (once per process, see [`music_app::media_folder`]). Call it when the
+    /// root changes, not on every frame.
     pub fn for_root(root: &Path) -> Mode {
-        Mode::choose(cfg!(target_os = "macos"), root)
+        let macos = cfg!(target_os = "macos");
+        let media = if macos {
+            music_app::media_folder()
+        } else {
+            None
+        };
+        Mode::choose(macos, root, media.as_deref())
     }
 
-    /// [`Mode::for_root`] with the platform as a parameter, so both answers are testable
-    /// on either platform.
-    pub fn choose(macos: bool, root: &Path) -> Mode {
-        if macos && is_music_media_folder(root) {
-            Mode::MusicApp
-        } else {
-            Mode::Copy
+    /// [`Mode::for_root`] with the platform and the Music app's media folder as
+    /// parameters, so every answer is testable on either platform.
+    ///
+    /// Both paths are resolved first, so a root reached through a symlink is recognised.
+    /// When the Music app's configured media folder is known, it is the whole answer: the
+    /// root is in Music mode exactly when it is that folder or inside it — a custom
+    /// location is found, and a stale `iTunes Media` backup is not mistaken for the live
+    /// library. Only when the preference cannot be read does the folder-name heuristic
+    /// ([`is_music_media_folder`]) decide.
+    pub fn choose(macos: bool, root: &Path, media_folder: Option<&Path>) -> Mode {
+        if !macos {
+            return Mode::Copy;
         }
+        let root = canonical(root);
+        let music = match media_folder {
+            Some(media) => root.starts_with(canonical(media)),
+            None => is_music_media_folder(&root),
+        };
+        if music { Mode::MusicApp } else { Mode::Copy }
     }
 }
 
-/// True if `root` is an Apple Music (or iTunes) media folder, or a folder inside one.
+/// `path` with symlinks and `..` resolved, or as given when it cannot be (it does not
+/// exist).
+fn canonical(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// True if `root` looks like an Apple Music (or iTunes) media folder, or a folder inside
+/// one — the fallback for when the Music app's own preference cannot be read.
 ///
-/// The Music app does not say where its media folder is to anything but itself, so this
-/// goes by the names it gives the folder: `…/Music/Media.localized` (shown as `Media`),
-/// `…/Music/Media` when the folder was never localised, and `…/iTunes/iTunes Media` from
-/// the iTunes days. The `Music` folder the songs actually live in sits one level below.
-/// A name match alone is not taken for `Media`, which is common enough to be a coincidence;
-/// it also needs the `Music` library folder as its parent.
+/// It goes by the names the Music app gives the folder: `…/Music/Media.localized` (shown as
+/// `Media`), `…/Music/Media` when the folder was never localised, and `…/iTunes/iTunes
+/// Media` from the iTunes days. The `Music` folder the songs actually live in sits one level
+/// below. A name match alone is not taken for `Media`, which is common enough to be a
+/// coincidence; it also needs the `Music` library folder as its parent.
 pub fn is_music_media_folder(root: &Path) -> bool {
     let names: Vec<String> = root
         .components()
@@ -259,8 +341,7 @@ pub fn sort_drop(paths: &[PathBuf]) -> Dropped {
 /// `~/Music/Music/Media.localized` is the same directory however it was spelled. A path
 /// that cannot be resolved (it does not exist) is compared as given.
 pub fn is_inside(root: &Path, path: &Path) -> bool {
-    let canon = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    canon(path).starts_with(canon(root))
+    canonical(path).starts_with(canonical(root))
 }
 
 /// Why an import or an edit did not happen.
@@ -329,6 +410,10 @@ pub enum Outcome {
     /// The file already lives inside the library root; importing it would only make a
     /// duplicate.
     AlreadyInLibrary,
+    /// The Music app did not answer in time. It may still be adding the file — it usually
+    /// is — so this is neither a success nor a failure, and the file must not be offered to
+    /// it again (that would add it twice).
+    Uncertain(Failure),
 }
 
 /// Import one audio file into the library at `root`, by `mode`.
@@ -357,7 +442,11 @@ pub fn import(mode: Mode, root: &Path, src: &Path, fields: &Fields) -> Result<Ou
                     "the Music app only adds AAC/ALAC (m4a), MP3, WAV and AIFF files",
                 ));
             }
-            let track = music_app::add(src)?;
+            let track = match music_app::add(src) {
+                Ok(track) => track,
+                Err(e) if music_app::timed_out(&e) => return Ok(Outcome::Uncertain(e)),
+                Err(e) => return Err(e),
+            };
             Placed {
                 mode,
                 location: track.location,
@@ -373,40 +462,88 @@ pub fn import(mode: Mode, root: &Path, src: &Path, fields: &Fields) -> Result<Ou
     Ok(Outcome::Imported(placed))
 }
 
-/// Apply an edit to an imported song: new `fields`, a new cover from the PNG/JPEG at
-/// `cover`, or both. Returns where the song is now — an edit of artist or album can move
-/// the file, in either mode.
-pub fn apply(
-    placed: &Placed,
-    root: &Path,
-    fields: Option<&Fields>,
-    cover: Option<&Path>,
-) -> Result<Placed, Failure> {
-    let image = cover.map(read_cover).transpose()?;
-    match placed.mode {
+/// An edit of an imported song: its fields as they should be afterwards, which of them
+/// the user actually changed, and a new cover image, if any.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Edit {
+    /// All seven fields as the editor shows them.
+    pub fields: Fields,
+    /// The ones to write ([`Fields::diff`] against what was shown before). Only these
+    /// reach the file or the Music app.
+    pub changed: Vec<Field>,
+    /// A PNG or JPEG to make the cover.
+    pub cover: Option<PathBuf>,
+}
+
+/// How far an edit got. An edit is two or three steps — fields, cover, and in copy mode a
+/// move — and a failure in a later one does not undo an earlier one, so the answer has to
+/// say what landed as well as what did not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Applied {
+    /// Where the song is now.
+    pub placed: Placed,
+    /// The changed fields were written.
+    pub fields: bool,
+    /// The cover was written.
+    pub cover: bool,
+    /// What stopped the rest, if anything did.
+    pub failure: Option<Failure>,
+}
+
+impl Applied {
+    /// True if anything reached the file — the cue for a rescan.
+    pub fn anything(&self) -> bool {
+        self.fields || self.cover
+    }
+}
+
+/// Apply an edit to an imported song, the way it went in. Every step that succeeded is
+/// reported as such even when a later one fails ([`Applied`]).
+pub fn apply(placed: &Placed, root: &Path, edit: &Edit) -> Applied {
+    let mut out = Applied {
+        placed: placed.clone(),
+        fields: false,
+        cover: false,
+        failure: None,
+    };
+    if let Err(failure) = apply_steps(&mut out, root, edit) {
+        out.failure = Some(failure);
+    }
+    out
+}
+
+fn apply_steps(out: &mut Applied, root: &Path, edit: &Edit) -> Result<(), Failure> {
+    let image = edit.cover.as_deref().map(read_cover).transpose()?;
+    let wants_fields = !edit.changed.is_empty();
+    match out.placed.mode {
         Mode::MusicApp => {
-            let id = placed
+            if out.placed.outside(root) {
+                return Err(Failure::new(
+                    "ORIGINAL NOT COPIED",
+                    "the Music app refers to the dropped file itself, so an edit would change the original",
+                ));
+            }
+            let id = out
+                .placed
                 .music_id
-                .as_deref()
+                .clone()
                 .ok_or_else(|| Failure::new("NOT IN THE MUSIC APP", "no persistent ID"))?;
-            let mut location = placed.location.clone();
-            if let Some(fields) = fields {
-                location = music_app::set_fields(id, fields)?.location.or(location);
+            if wants_fields {
+                let track = music_app::set_fields(&id, &edit.fields, &edit.changed)?;
+                out.placed.location = track.location.or(out.placed.location.take());
+                out.fields = true;
             }
-            if let (Some(path), Some((_, kind))) = (cover, &image) {
-                location = music_app::set_artwork(id, path, *kind)?
-                    .location
-                    .or(location);
+            if let (Some(path), Some((_, kind))) = (&edit.cover, &image) {
+                let track = music_app::set_artwork(&id, path, *kind)?;
+                out.placed.location = track.location.or(out.placed.location.take());
+                out.cover = true;
             }
-            Ok(Placed {
-                location,
-                ..placed.clone()
-            })
         }
         Mode::Copy => {
-            let location = placed
+            let location = out
+                .placed
                 .location
-                .as_deref()
+                .clone()
                 .ok_or_else(|| Failure::new("FILE MISSING", "no location"))?;
             if !location.is_file() {
                 return Err(Failure::new(
@@ -415,19 +552,17 @@ pub fn apply(
                 ));
             }
             if let Some((bytes, kind)) = &image {
-                copy::write_cover(location, bytes, *kind)?;
+                copy::write_cover(&location, bytes, *kind)?;
+                out.cover = true;
             }
-            let mut location = location.to_path_buf();
-            if let Some(fields) = fields {
-                copy::write_fields(&location, fields)?;
-                location = copy::refile(root, &location, fields)?;
+            if wants_fields {
+                copy::write_fields(&location, &edit.fields, &edit.changed)?;
+                out.fields = true;
+                out.placed.location = Some(copy::refile(root, &location, &edit.fields)?);
             }
-            Ok(Placed {
-                location: Some(location),
-                ..placed.clone()
-            })
         }
     }
+    Ok(())
 }
 
 /// The two cover formats, told apart by their bytes rather than their extension.
@@ -505,7 +640,7 @@ pub(crate) mod tests {
     /// A WAV with an ID3v2 tag carrying `fields`.
     pub(crate) fn write_tagged_wav(path: &Path, fields: &Fields) {
         write_wav(path);
-        copy::write_fields(path, fields).expect("tag the fixture");
+        copy::write_fields(path, fields, &Field::ALL).expect("tag the fixture");
     }
 
     /// An encoded image of `edge` px in `format`.
@@ -574,16 +709,60 @@ pub(crate) mod tests {
     #[test]
     fn only_a_mac_with_a_music_media_folder_goes_through_the_music_app() {
         let music = Path::new("/Users/me/Music/Music/Media.localized/Music");
-        assert_eq!(Mode::choose(true, music), Mode::MusicApp);
+        assert_eq!(Mode::choose(true, music, None), Mode::MusicApp);
         assert_eq!(
-            Mode::choose(false, music),
+            Mode::choose(false, music, None),
             Mode::Copy,
             "Linux has no Music app"
         );
         assert_eq!(
-            Mode::choose(true, Path::new("/Users/me/.phoebus")),
+            Mode::choose(true, Path::new("/Users/me/.phoebus"), None),
             Mode::Copy
         );
+    }
+
+    /// The Music app's own media-folder preference decides when it is known: a custom
+    /// location with an ordinary name is found, a symlinked root is resolved first, and a
+    /// stale `iTunes Media` backup that merely *looks* like a media folder is not taken.
+    #[test]
+    fn the_configured_media_folder_outranks_the_folder_names() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let media = dir.path().join("Audio Archive");
+        let root = media.join("Music");
+        fs::create_dir_all(&root).expect("mkdir");
+        let link = dir.path().join("link-to-root");
+        std::os::unix::fs::symlink(&root, &link).expect("symlink");
+        let stale = dir.path().join("Backup/iTunes/iTunes Media/Music");
+        fs::create_dir_all(&stale).expect("mkdir");
+
+        assert_eq!(Mode::choose(true, &root, Some(&media)), Mode::MusicApp);
+        assert_eq!(Mode::choose(true, &media, Some(&media)), Mode::MusicApp);
+        assert_eq!(
+            Mode::choose(true, &link, Some(&media)),
+            Mode::MusicApp,
+            "a symlinked root is the same folder"
+        );
+        assert_eq!(
+            Mode::choose(true, &stale, Some(&media)),
+            Mode::Copy,
+            "a backup is not the live library"
+        );
+        // No preference to go by: the names decide, which is all they are good for.
+        assert_eq!(Mode::choose(true, &stale, None), Mode::MusicApp);
+        assert_eq!(Mode::choose(true, &root, None), Mode::Copy);
+        assert_eq!(Mode::choose(false, &root, Some(&media)), Mode::Copy);
+    }
+
+    #[test]
+    fn a_diff_names_only_what_changed() {
+        let before = sample();
+        assert!(before.diff(&before).is_empty());
+        let after = Fields {
+            genre: "Ambient".into(),
+            year: None,
+            ..sample()
+        };
+        assert_eq!(before.diff(&after), vec![Field::Genre, Field::Year]);
     }
 
     #[test]
@@ -731,7 +910,18 @@ pub(crate) mod tests {
             album: "Resonance (Single)".into(),
             ..fields.clone()
         };
-        let placed = apply(&placed, &root, Some(&edited), Some(&cover)).expect("applied");
+        let applied = apply(
+            &placed,
+            &root,
+            &Edit {
+                changed: fields.diff(&edited),
+                fields: edited.clone(),
+                cover: Some(cover.clone()),
+            },
+        );
+        assert_eq!(applied.failure, None);
+        assert!(applied.fields && applied.cover);
+        let placed = applied.placed;
         let moved = placed.location.clone().expect("a location");
         assert_eq!(moved, root.join("HOME/Resonance (Single)/03 Resonance.wav"));
         assert!(!at.exists() && !root.join("HOME/Odyssey").exists());
@@ -785,9 +975,141 @@ pub(crate) mod tests {
             location: Some(PathBuf::from("/nonexistent/phoebus/x.wav")),
             music_id: None,
         };
-        let err =
-            apply(&placed, Path::new("/nonexistent"), Some(&sample()), None).expect_err("gone");
-        assert_eq!(err.reason, "FILE MISSING");
+        let edit = Edit {
+            fields: sample(),
+            changed: vec![Field::Title],
+            cover: None,
+        };
+        let applied = apply(&placed, Path::new("/nonexistent"), &edit);
+        assert_eq!(
+            applied.failure.as_ref().expect("gone").reason,
+            "FILE MISSING"
+        );
+        assert!(!applied.anything());
+    }
+
+    /// Only the changed fields are written: an untouched album artist that `Fields::read`
+    /// filled in from the artist must not appear in the tags afterwards.
+    #[test]
+    fn an_edit_writes_only_the_fields_that_changed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("lib");
+        fs::create_dir_all(&root).expect("mkdir");
+        let src = dir.path().join("in.wav");
+        // Tagged with an artist and no album artist: the read fills one in.
+        write_wav(&src);
+        copy::write_fields(
+            &src,
+            &Fields {
+                title: "Song".into(),
+                artist: "Guest".into(),
+                ..Fields::default()
+            },
+            &[Field::Title, Field::Artist],
+        )
+        .expect("tag");
+        let shown = Fields::read(&src).expect("readable");
+        assert_eq!(shown.album_artist, "Guest", "the fallback the editor shows");
+        let Outcome::Imported(placed) = import(Mode::Copy, &root, &src, &shown).expect("ok") else {
+            panic!("not imported");
+        };
+        let edited = Fields {
+            genre: "Jazz".into(),
+            ..shown.clone()
+        };
+        let applied = apply(
+            &placed,
+            &root,
+            &Edit {
+                changed: shown.diff(&edited),
+                fields: edited,
+                cover: None,
+            },
+        );
+        assert_eq!(applied.failure, None);
+        let at = applied.placed.location.expect("location");
+        let tagged = lofty::read_from_path(&at).expect("read");
+        let tag = tagged.primary_tag().expect("tag");
+        assert_eq!(tag.genre().as_deref(), Some("Jazz"));
+        assert_eq!(
+            tag.get_string(ItemKey::AlbumArtist),
+            None,
+            "the fallback was never written"
+        );
+    }
+
+    /// Tags written and then the move refused: the edit reports both halves, so the list
+    /// can keep the new fields and still rescan.
+    #[test]
+    fn a_partial_edit_reports_what_landed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("lib");
+        fs::create_dir_all(&root).expect("mkdir");
+        let src = dir.path().join("in.wav");
+        write_tagged_wav(&src, &sample());
+        let Outcome::Imported(placed) = import(Mode::Copy, &root, &src, &sample()).expect("ok")
+        else {
+            panic!("not imported");
+        };
+        let edited = Fields {
+            album_artist: "Somebody Else".into(),
+            ..sample()
+        };
+        // The root refuses a new artist folder; the song's own folder stays writable.
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o555)).expect("chmod");
+        let applied = apply(
+            &placed,
+            &root,
+            &Edit {
+                changed: sample().diff(&edited),
+                fields: edited.clone(),
+                cover: None,
+            },
+        );
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).expect("chmod back");
+        assert!(applied.fields, "the tags were written");
+        assert_eq!(
+            applied.failure.as_ref().expect("refused").reason,
+            "NOT MOVED"
+        );
+        assert_eq!(
+            applied.placed.location, placed.location,
+            "still where it was"
+        );
+        let at = applied.placed.location.expect("location");
+        assert_eq!(Fields::read(&at).expect("readable"), edited);
+    }
+
+    /// A track the Music app kept outside its media folder points at the user's own file:
+    /// an edit is refused before the Music app is ever asked.
+    #[test]
+    fn an_original_the_music_app_did_not_copy_is_never_edited() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("Music/Media.localized/Music");
+        fs::create_dir_all(&root).expect("mkdir");
+        let original = dir.path().join("Downloads/song.m4a");
+        write_wav(&original);
+        let placed = Placed {
+            mode: Mode::MusicApp,
+            location: Some(original),
+            music_id: Some("0123456789ABCDEF".into()),
+        };
+        assert!(placed.outside(&root));
+        let applied = apply(
+            &placed,
+            &root,
+            &Edit {
+                fields: sample(),
+                changed: vec![Field::Title],
+                cover: None,
+            },
+        );
+        assert_eq!(
+            applied.failure.as_ref().expect("refused").reason,
+            "ORIGINAL NOT COPIED"
+        );
+        assert!(!applied.anything());
     }
 
     #[test]
