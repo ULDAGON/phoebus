@@ -219,20 +219,63 @@ fn check_albums(report: &mut Report, library: &Library) {
             ),
         );
 
-        // Only albums with embedded artwork ever get a cache PNG; an art-less album is
-        // not a failure, it is just reported.
-        if album.has_artwork {
-            let cover = library.cover_path(key);
-            let bytes = std::fs::metadata(&cover).map(|m| m.len()).unwrap_or(0);
+        // Every distinct picture of the album's songs has a cache PNG; an art-less album
+        // is not a failure, it is just reported.
+        if album.has_artwork() {
+            let missing: Vec<String> = album
+                .covers
+                .iter()
+                .filter(|id| {
+                    std::fs::metadata(library.cover_path(**id)).map_or(0, |m| m.len()) == 0
+                })
+                .map(ToString::to_string)
+                .collect();
             report.check(
-                bytes > 0,
+                missing.is_empty(),
                 "album.artwork",
-                &format!("{label}: {bytes} bytes at {}", cover.display()),
+                &format!(
+                    "{label}: {} distinct cover(s){}, missing {missing:?}",
+                    album.covers.len(),
+                    if album.mosaic().len() > 1 {
+                        " (mosaic)"
+                    } else {
+                        ""
+                    }
+                ),
             );
         } else {
             println!("INFO album.artwork {label}: no embedded artwork, cache not expected");
         }
     }
+    check_cover_cache(report, library);
+}
+
+/// The cover cache holds one PNG per distinct picture: as many cache files as the library
+/// has covers, never one per song. Files a scan running beside this one wrote would count
+/// too, so this is only meaningful on a quiet data dir — which is how the self-test runs.
+fn check_cover_cache(report: &mut Report, library: &Library) {
+    let with_art = library.tracks().filter(|t| t.has_artwork()).count();
+    let covers = library.cover_ids();
+    let files = std::fs::read_dir(library.covers_dir()).map_or(0, |entries| {
+        entries
+            .filter_map(Result::ok)
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .and_then(phoebus_core::CoverId::from_file_name)
+                    .is_some()
+            })
+            .count()
+    });
+    report.check(
+        files == covers.len(),
+        "covers.cache",
+        &format!(
+            "{with_art} songs with art, {} distinct covers, {files} cache files in {}",
+            covers.len(),
+            library.covers_dir().display()
+        ),
+    );
 }
 
 /// The launch path, headless: save the scanned library as a snapshot (into a scratch dir,

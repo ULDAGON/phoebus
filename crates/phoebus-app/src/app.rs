@@ -515,15 +515,17 @@ impl Phoebus {
     /// texture, not a cache, not a selection. Otherwise the library is replaced and the
     /// derived caches rebuilt, but the view, its scroll offset (egui keeps it by widget id),
     /// the selections ([`ViewState::library_refreshed`]), and playback and the queue (which
-    /// hold track ids, stable across scans) all stay; only the covers of albums that
-    /// actually changed are reloaded ([`Artwork::refresh`]). The one thing that does move
+    /// hold track ids, stable across scans) all stay, and so does every cover already on
+    /// screen ([`Artwork::refresh`]): covers are named by their picture, so new art arrives
+    /// as a new cover, and the old one is painted in its place until it has loaded. The one
+    /// thing that does move
     /// the user is the page they are on disappearing: an album that is no longer in the
     /// library sends them to Recently Added, as a blocking scan would.
     fn swap_in(&mut self, library: Library) {
         let changed = self.library.changed_albums(&library);
         // Even an unchanged library can come with covers that were missing a moment ago (a
         // cleared cache, refilled by the scan): placeholders get another look either way.
-        self.artwork.refresh(&changed);
+        self.artwork.refresh(self.library.replaced_covers(&library));
         if changed.is_empty() {
             log::info!("scan: the library on screen is current");
             return;

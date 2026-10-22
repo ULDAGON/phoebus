@@ -1,25 +1,31 @@
-//! Album cover cache: `AlbumKey` → GPU texture, decoded off the frame path.
+//! Cover cache: [`CoverId`] → GPU texture, decoded off the frame path.
+//!
+//! Keyed by the picture, not the album: a song paints its own cover, an album whose songs
+//! all carry one picture shares one texture between every place that shows it, and a
+//! compilation whose songs each carry their own gets one per song. The scan names each cached PNG by the same id, so a texture can never be
+//! out of date for its key — which is what lets [`Artwork::refresh`] keep every uploaded
+//! one across a rescan.
 //!
 //! Rules that keep scrolling at 60 fps:
 //! * a PNG is decoded on a **background thread**, never while a frame is being laid out;
 //! * a texture is uploaded **once** and then reused at every size (48 px LCD, 180 px card,
 //!   232 px detail header);
 //! * a cover that is missing or unreadable is remembered as such, so the loader is asked
-//!   exactly once per album per scan;
+//!   exactly once per cover per scan;
 //! * at most [`MAX_TEXTURES`] textures are alive at once. A cover is up to 600 × 600 RGBA
 //!   (~1.4 MB of VRAM), so an unbounded cache would pin gigabytes on a large library.
 //!   The least recently *painted* textures are dropped past the cap and simply reload if
 //!   they come back on screen.
 //!
 //! Until a texture arrives the caller gets a placeholder: a `BG2` square with a `TEXT_LOW`
-//! `♪`. That is also the permanent look of an album with no artwork.
+//! `♪`. That is also the permanent look of a song or album with no artwork.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use crossbeam_channel::{Receiver, Sender};
 use egui::{Align2, Context, Rect, Response, Sense, TextureHandle, TextureId, Ui, Vec2};
-use phoebus_core::AlbumKey;
+use phoebus_core::CoverId;
 
 use crate::theme;
 
@@ -31,7 +37,7 @@ const MAX_TEXTURES: usize = 48;
 
 /// What the loader thread is asked to do.
 struct Job {
-    key: AlbumKey,
+    key: CoverId,
     path: PathBuf,
     /// The [`Artwork::generation`] this job was queued under.
     generation: u64,
@@ -39,7 +45,7 @@ struct Job {
 
 /// What comes back. `image` is `None` when the file is missing or undecodable.
 struct Done {
-    key: AlbumKey,
+    key: CoverId,
     image: Option<egui::ColorImage>,
     /// Copied back from [`Job::generation`] — a reply decoded before the last rescan
     /// carries the old value and is dropped on arrival.
@@ -51,13 +57,9 @@ struct Ready {
     tex: TextureHandle,
     /// [`Artwork::frame`] at the last [`Artwork::texture`] call — the LRU key.
     used: u64,
-    /// The cover file may have been rewritten since this was decoded
-    /// ([`Artwork::refresh`]). The texture keeps being painted until the next
-    /// [`Artwork::texture`] call has queued a reload and its reply replaces it.
-    stale: bool,
 }
 
-/// Cache state for one album.
+/// Cache state for one cover.
 enum Slot {
     /// A job is in flight.
     Loading,
@@ -70,15 +72,19 @@ enum Slot {
 /// The cover cache. One instance lives in the app; pass it around as `&mut`.
 pub struct Artwork {
     covers_dir: PathBuf,
-    slots: HashMap<AlbumKey, Slot>,
+    slots: HashMap<CoverId, Slot>,
     jobs: Sender<Job>,
     done: Receiver<Done>,
     /// Generation counter, bumped by [`Artwork::reset`]; stale replies are dropped.
     generation: u64,
     /// Keys with a job in flight *for the current generation*. Drives [`Artwork::is_idle`].
-    pending: HashSet<AlbumKey>,
+    pending: HashSet<CoverId>,
     /// Frames pumped so far — the clock the LRU ages textures against.
     frame: u64,
+    /// New cover → the cover it replaces, for a song or album tile whose art a rescan
+    /// changed ([`Artwork::refresh`]). While the new one loads, the old texture is painted
+    /// in its place, so a re-tag never shows the placeholder in between.
+    standins: HashMap<CoverId, CoverId>,
 }
 
 impl Artwork {
@@ -100,6 +106,7 @@ impl Artwork {
             generation: 0,
             pending: HashSet::new(),
             frame: 0,
+            standins: HashMap::new(),
         }
     }
 
@@ -108,31 +115,37 @@ impl Artwork {
     pub fn reset(&mut self, covers_dir: PathBuf) {
         self.covers_dir = covers_dir;
         self.slots.clear();
+        self.standins.clear();
         self.pending.clear();
         self.generation = self.generation.wrapping_add(1);
     }
 
-    /// A background rescan finished: reload what it may have changed, and nothing else.
+    /// A background rescan finished: forget what it may have changed, and nothing else.
     ///
-    /// A cover on screen is only touched when its album is in `changed` — the scan can only
-    /// have rewritten the cache file of an album whose tracks moved. Everything else that is
-    /// already uploaded stays as it is, which is what keeps a rescan that found one new
-    /// album from blanking the whole grid for a frame. The changed albums' textures are
-    /// kept too, marked stale: they are painted until the reload that the next
-    /// [`Artwork::texture`] call queues has landed, and then replaced — never a placeholder
-    /// in between.
+    /// Every uploaded cover stays. A cache file is named by its picture, so the scan never
+    /// rewrites one with other art — new art is a new id, which simply is not loaded yet.
+    /// One the library no longer uses just ages out of the LRU.
     ///
-    /// Two kinds of slot go regardless. `Missing` ones, because "no cover" may only have
-    /// meant "not extracted yet" — a cover cache that was cleared, or an album whose art
-    /// the scan just pulled out; each is asked for once more, the next time it is painted.
-    /// And `Loading` ones, because their reply may have been decoded from the file the scan
-    /// just replaced: the generation bump drops every such reply, and a slot left at
-    /// `Loading` would then never be asked for again.
-    pub fn refresh(&mut self, changed: &BTreeSet<AlbumKey>) {
+    /// `replaced` pairs each cover the rescan replaced with its successor, `(old, new)`
+    /// ([`phoebus_core::Library::replaced_covers`]): a re-tagged song, a changed tile of an
+    /// album's mosaic. Until the new one has loaded, the old texture is painted in its
+    /// place, so the swap shows no placeholder anywhere — the first frame after it paints
+    /// exactly what the frame before did, and each new cover replaces its old one as it
+    /// arrives. A new cover that turns out to be missing ends as the placeholder only then.
+    ///
+    /// Two kinds of slot go. `Missing` ones, because "no cover" may only have meant "not
+    /// written yet" — a first scan still running, or a cover cache that was cleared and
+    /// that the scan just refilled; each is asked for once more, the next time it is
+    /// painted. And `Loading` ones, because the generation bump drops every reply in
+    /// flight, and a slot left at `Loading` would then never be asked for again.
+    pub fn refresh(&mut self, replaced: impl IntoIterator<Item = (CoverId, CoverId)>) {
         self.slots.retain(|_, slot| matches!(slot, Slot::Ready(_)));
-        for key in changed {
-            if let Some(Slot::Ready(ready)) = self.slots.get_mut(key) {
-                ready.stale = true;
+        self.standins.clear();
+        for (old, new) in replaced {
+            if matches!(self.slots.get(&old), Some(Slot::Ready(_)))
+                && !self.slots.contains_key(&new)
+            {
+                self.standins.insert(new, old);
             }
         }
         self.pending.clear();
@@ -145,20 +158,20 @@ impl Artwork {
         self.frame = self.frame.wrapping_add(1);
         let mut uploaded = false;
         while let Ok(done) = self.done.try_recv() {
-            if !self.accept(&done.key, done.generation) {
+            if !self.accept(done.key, done.generation) {
                 continue; // decoded before the last rescan
             }
             let slot = match done.image {
                 Some(image) => {
-                    let name = format!("cover-{:016x}", done.key.hash64());
+                    let name = format!("cover-{}", done.key);
                     Slot::Ready(Ready {
                         tex: ctx.load_texture(name, image, egui::TextureOptions::LINEAR),
                         used: self.frame,
-                        stale: false,
                     })
                 }
                 None => Slot::Missing,
             };
+            self.standins.remove(&done.key);
             self.slots.insert(done.key, slot);
             uploaded = true;
         }
@@ -178,18 +191,18 @@ impl Artwork {
     /// pending now": after a rescan the visible grid re-requests the same keys
     /// immediately, so a key being pending says nothing about which scan's cover file the
     /// reply in hand was decoded from.
-    fn accept(&mut self, key: &AlbumKey, generation: u64) -> bool {
+    fn accept(&mut self, key: CoverId, generation: u64) -> bool {
         if generation != self.generation {
             return false;
         }
-        self.pending.remove(key);
+        self.pending.remove(&key);
         true
     }
 
     /// Drop the least recently painted textures past [`MAX_TEXTURES`].
     ///
     /// Only `Ready` slots cost VRAM; `Missing` slots are one enum variant each and are
-    /// what stops the loader being asked again for an album with no art. A dropped
+    /// what stops the loader being asked again for a cover that is not there. A dropped
     /// `TextureHandle` frees the GPU texture, and the next [`Artwork::texture`] call for
     /// that key simply re-requests the decode.
     fn evict(&mut self) {
@@ -201,12 +214,12 @@ impl Artwork {
         if live <= MAX_TEXTURES {
             return;
         }
-        let mut ages: Vec<(u64, AlbumKey)> = self
+        let mut ages: Vec<(u64, CoverId)> = self
             .slots
             .iter()
             .filter_map(|(key, slot)| match slot {
                 // Never evict something uploaded or painted on this very frame.
-                Slot::Ready(ready) if ready.used != self.frame => Some((ready.used, key.clone())),
+                Slot::Ready(ready) if ready.used != self.frame => Some((ready.used, *key)),
                 _ => None,
             })
             .collect();
@@ -216,50 +229,54 @@ impl Artwork {
         }
     }
 
-    /// The texture for an album, requesting a load the first time it is asked for.
+    /// The texture of a cover, requesting a load the first time it is asked for.
     ///
-    /// Returns `None` while the cover is loading, and forever if there is none.
-    pub fn texture(&mut self, key: &AlbumKey) -> Option<TextureId> {
+    /// Returns `None` while the cover is loading, and forever if there is none — except
+    /// that a cover standing in for it after a rescan ([`Artwork::refresh`]) is returned
+    /// while it loads.
+    pub fn texture(&mut self, key: CoverId) -> Option<TextureId> {
         let frame = self.frame;
-        if let Some(slot) = self.slots.get_mut(key) {
+        if let Some(slot) = self.slots.get_mut(&key) {
             return match slot {
                 Slot::Ready(ready) => {
                     ready.used = frame;
-                    let id = ready.tex.id();
-                    if std::mem::take(&mut ready.stale) {
-                        // The old texture stays in the slot and keeps being painted; the
-                        // reply replaces it.
-                        self.enqueue(key);
-                    }
-                    Some(id)
+                    Some(ready.tex.id())
                 }
-                _ => None,
+                Slot::Loading => self.standin(key),
+                Slot::Missing => None,
             };
         }
         if self.covers_dir.as_os_str().is_empty() {
             return None;
         }
-        self.slots.insert(key.clone(), Slot::Loading);
-        self.enqueue(key);
-        None
-    }
-
-    /// Queue a decode of `key`'s cover under the current generation. If the loader is gone,
-    /// the album is `Missing`.
-    fn enqueue(&mut self, key: &AlbumKey) {
-        let path = self.covers_dir.join(key.cover_file_name());
-        self.pending.insert(key.clone());
+        let path = self.covers_dir.join(key.file_name());
+        self.slots.insert(key, Slot::Loading);
+        self.pending.insert(key);
         if self
             .jobs
             .send(Job {
-                key: key.clone(),
+                key,
                 path,
                 generation: self.generation,
             })
             .is_err()
         {
-            self.slots.insert(key.clone(), Slot::Missing);
-            self.pending.remove(key);
+            self.slots.insert(key, Slot::Missing);
+            self.pending.remove(&key);
+            return None;
+        }
+        self.standin(key)
+    }
+
+    /// The texture of the cover `key` replaced, while `key` loads.
+    fn standin(&mut self, key: CoverId) -> Option<TextureId> {
+        let old = *self.standins.get(&key)?;
+        match self.slots.get_mut(&old) {
+            Some(Slot::Ready(ready)) => {
+                ready.used = self.frame;
+                Some(ready.tex.id())
+            }
+            _ => None,
         }
     }
 
@@ -317,18 +334,18 @@ fn decode(path: &std::path::Path) -> Option<egui::ColorImage> {
     ))
 }
 
-/// Draw an album cover of `size` at the current cursor and return its response.
+/// Draw a cover of `size` at the current cursor and return its response.
 ///
-/// `key` of `None` (or a cover that has not loaded) paints the placeholder.
-pub fn cover(ui: &mut Ui, art: &mut Artwork, key: Option<&AlbumKey>, size: f32) -> Response {
+/// `None` (or a cover that has not loaded) paints the placeholder.
+pub fn cover(ui: &mut Ui, art: &mut Artwork, cover: Option<CoverId>, size: f32) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
-    paint_cover(ui, art, key, rect);
+    paint_cover(ui, art, cover, rect);
     response
 }
 
-/// Paint an album cover into an already-allocated rect.
-pub fn paint_cover(ui: &Ui, art: &mut Artwork, key: Option<&AlbumKey>, rect: Rect) {
-    let tex = key.and_then(|k| art.texture(k));
+/// Paint a cover into an already-allocated rect.
+pub fn paint_cover(ui: &Ui, art: &mut Artwork, cover: Option<CoverId>, rect: Rect) {
+    let tex = cover.and_then(|c| art.texture(c));
     let painter = ui.painter_at(rect);
     match tex {
         Some(id) => {
@@ -363,105 +380,90 @@ mod tests {
     fn a_reply_decoded_before_a_rescan_is_dropped_and_the_fresh_one_kept() {
         let mut art = Artwork::new();
         art.reset(PathBuf::from("/nonexistent/covers"));
-        let key = AlbumKey::new("HOME", "Odyssey");
+        let key = CoverId(0x0d55_e700);
 
-        assert!(art.texture(&key).is_none(), "the first ask only enqueues");
+        assert!(art.texture(key).is_none(), "the first ask only enqueues");
         let stale = art.generation;
         assert!(!art.is_idle());
 
         art.reset(PathBuf::from("/nonexistent/covers")); // a rescan finished
         assert!(art.is_idle(), "the old generation stops counting");
-        assert!(art.texture(&key).is_none(), "the grid asks again");
+        assert!(art.texture(key).is_none(), "the grid asks again");
         assert!(!art.is_idle());
 
         assert!(
-            !art.accept(&key, stale),
+            !art.accept(key, stale),
             "the pre-rescan decode must not be installed"
         );
         assert!(!art.is_idle(), "…and must not clear the fresh request");
         assert!(
-            art.accept(&key, art.generation),
+            art.accept(key, art.generation),
             "the fresh decode must be installed"
         );
         assert!(art.is_idle());
     }
 
-    fn ready(ctx: &Context, stale: bool) -> Slot {
-        let image = egui::ColorImage::filled([1, 1], egui::Color32::WHITE);
-        let tex = ctx.load_texture("t", image, egui::TextureOptions::LINEAR);
-        Slot::Ready(Ready {
-            tex,
-            used: 0,
-            stale,
-        })
-    }
-
-    /// A quiet rescan keeps every uploaded cover on screen, and gives every placeholder
-    /// one more chance.
+    /// A quiet rescan keeps every uploaded cover — a cover's file never changes under its
+    /// name — and gives every placeholder one more chance.
     #[test]
-    fn a_refresh_keeps_covers_and_drops_the_unsettled_slots() {
+    fn a_refresh_keeps_every_uploaded_cover_and_retries_the_unsettled_ones() {
         let ctx = Context::default();
         let mut art = Artwork::new();
         art.reset(PathBuf::from("/nonexistent/covers"));
-        let [kept, changed, missing, loading] =
-            ["kept", "changed", "missing", "loading"].map(|a| AlbumKey::new(a, "Album"));
-        for key in [&kept, &changed] {
-            art.slots.insert(key.clone(), ready(&ctx, false));
+        let [kept, other, missing, loading] = [1, 2, 3, 4].map(CoverId);
+        let image = || egui::ColorImage::filled([1, 1], egui::Color32::WHITE);
+        for key in [kept, other] {
+            let tex = ctx.load_texture("t", image(), egui::TextureOptions::LINEAR);
+            art.slots.insert(key, Slot::Ready(Ready { tex, used: 0 }));
         }
-        art.slots.insert(missing.clone(), Slot::Missing);
-        assert!(art.texture(&loading).is_none(), "enqueued");
+        art.slots.insert(missing, Slot::Missing);
+        assert!(art.texture(loading).is_none(), "enqueued");
         let before = art.generation;
 
-        art.refresh(&BTreeSet::from([changed.clone()]));
-        assert!(art.generation != before, "in-flight replies are dropped");
-        assert!(
-            art.is_idle(),
-            "nothing is in flight until a cover is asked for"
-        );
-        for key in [&missing, &loading] {
-            assert!(!art.slots.contains_key(key), "{key} is asked for again");
+        art.refresh([]);
+        for key in [kept, other] {
+            assert!(art.texture(key).is_some(), "{key} stays on screen");
         }
-
-        assert!(art.texture(&kept).is_some(), "an unchanged cover stays");
-        assert!(art.is_idle(), "…and is not reloaded");
-        assert!(
-            art.texture(&changed).is_some(),
-            "a changed cover is still painted while it reloads"
-        );
-        assert!(!art.is_idle(), "…with its reload queued");
-        assert!(art.texture(&changed).is_some());
-        assert_eq!(art.pending.len(), 1, "…once");
+        assert!(art.generation != before, "in-flight replies are dropped");
+        for key in [missing, loading] {
+            assert!(!art.slots.contains_key(&key), "{key} is asked for again");
+        }
     }
 
-    /// The point of keeping the old texture: the reply, when it lands, replaces it — and
-    /// a cover that is gone for good ends as the placeholder only then.
+    fn ready(ctx: &Context) -> (Slot, TextureId) {
+        let image = egui::ColorImage::filled([1, 1], egui::Color32::WHITE);
+        let tex = ctx.load_texture("t", image, egui::TextureOptions::LINEAR);
+        let id = tex.id();
+        (Slot::Ready(Ready { tex, used: 0 }), id)
+    }
+
+    /// A re-tag gives a song a new cover id. The quiet swap must not blank it: the old
+    /// texture is painted until the new one has landed, and a new cover that is missing
+    /// ends as the placeholder only then.
     #[test]
-    fn a_refreshed_cover_is_replaced_by_its_reload_not_blanked_before_it() {
+    fn a_replaced_cover_is_painted_until_its_successor_lands() {
         let ctx = Context::default();
         let dir = tempfile::tempdir().expect("tempdir");
-        let [changed, gone] = ["changed", "gone"].map(|a| AlbumKey::new(a, "Album"));
-        let png = dir.path().join(changed.cover_file_name());
+        let [old, new, old_gone, new_gone, untouched] = [1, 2, 3, 4, 5].map(CoverId);
         image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]))
-            .save(&png)
+            .save(dir.path().join(new.file_name()))
             .expect("write cover");
 
         let mut art = Artwork::new();
         art.reset(dir.path().to_path_buf());
-        let old = ready(&ctx, false);
-        let Slot::Ready(Ready { tex, .. }) = &old else {
-            unreachable!()
-        };
-        let old_id = tex.id();
-        art.slots.insert(changed.clone(), old);
-        art.slots.insert(gone.clone(), ready(&ctx, false)); // its file does not exist
+        let (slot, old_tex) = ready(&ctx);
+        art.slots.insert(old, slot);
+        let (slot, old_gone_tex) = ready(&ctx);
+        art.slots.insert(old_gone, slot);
 
-        art.refresh(&BTreeSet::from([changed.clone(), gone.clone()]));
+        art.refresh([(old, new), (old_gone, new_gone), (untouched, CoverId(6))]);
+        assert_eq!(art.texture(new), Some(old_tex), "the old art while loading");
+        assert_eq!(art.texture(new_gone), Some(old_gone_tex));
         assert_eq!(
-            art.texture(&changed),
-            Some(old_id),
-            "painted while reloading"
+            art.texture(CoverId(6)),
+            None,
+            "nothing to stand in with: the placeholder, as for any first load"
         );
-        assert!(art.texture(&gone).is_some(), "painted while reloading");
 
         for _ in 0..500 {
             art.pump(&ctx);
@@ -470,16 +472,25 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert!(art.is_idle(), "the reloads landed");
-        let new_id = art.texture(&changed).expect("still has a cover");
-        assert!(new_id != old_id, "the reload replaced the old texture");
-        assert!(art.texture(&gone).is_none(), "the vanished cover is gone");
+        assert!(art.is_idle(), "the loads landed");
+        let landed = art.texture(new).expect("the new cover");
+        assert!(landed != old_tex, "the new texture replaced the old one");
+        assert_eq!(
+            art.texture(new_gone),
+            None,
+            "a missing new cover is missing"
+        );
+        assert_eq!(
+            art.texture(old),
+            Some(old_tex),
+            "the old cover is still its own"
+        );
     }
 
     #[test]
     fn a_key_with_no_covers_dir_is_never_enqueued() {
         let mut art = Artwork::new();
-        assert!(art.texture(&AlbumKey::new("HOME", "Odyssey")).is_none());
+        assert!(art.texture(CoverId(7)).is_none());
         assert!(art.is_idle(), "nothing to wait for before the first scan");
     }
 }

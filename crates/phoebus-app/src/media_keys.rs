@@ -369,13 +369,17 @@ fn seek_target(pos: Duration, dir: SeekDirection, by: Duration) -> Duration {
     }
 }
 
-/// `file://` URL of a track's cached cover, or `None` when there is not a readable one.
+/// `file://` URL of a track's own cached cover, or `None` when there is not a readable one.
 ///
 /// `None` is the safe answer, not merely the tidy one: a `cover_url` the platform cannot
 /// load takes the whole process down (module header, API-FACTS §4). The cover cache is
 /// written by the scanner, so "missing" is the ordinary state during a first scan.
 fn cover_url(library: &Library, track: &Track, verbose: bool) -> Option<String> {
-    let path = library.cover_path(&track.album_key);
+    let Some(cover) = track.cover else {
+        note(verbose, format_args!("no embedded cover, omitted"));
+        return None;
+    };
+    let path = library.cover_path(cover);
     if !path.exists() {
         note(
             verbose,
