@@ -54,8 +54,31 @@ Formats: m4a (AAC + ALAC), mp3, flac, ogg, wav, aiff, aac. Tags are read with se
 fallbacks — an untagged `Artist/Album/01 Title.mp3` still lands in the right place.
 
 Point it anywhere in **Settings** (sidebar, bottom) — including straight at
-`~/Music/Music/Media.localized/Music`. Phoebus only ever *reads* the library root: app data
-(state, playlists, cover cache) lives in `~/.phoebus/.phoebus/`, never in your music.
+`~/Music/Music/Media.localized/Music`. Phoebus only *reads* the library root — the one exception
+is [importing](#importing), which you start yourself. App data (state, playlists, cover
+cache) lives in `~/.phoebus/.phoebus/`, never in your music.
+
+## Importing
+
+An import behaves like dropping the same files onto Apple Music. Which way it goes depends
+on the library root:
+
+- **macOS, root inside an Apple Music media folder** (e.g.
+  `~/Music/Music/Media.localized/Music`): Phoebus hands every file to the Music app, which
+  copies it into its media folder and files it its own way — the song shows up in Apple
+  Music exactly as if it had been dropped there. Edits of fields and covers go through the
+  Music app too, so it writes the tags and both libraries agree. The first import makes
+  macOS ask once: **"Phoebus wants to control Music"** — allow it (or later under System
+  Settings › Privacy & Security › Automation). Run from a terminal, the prompt names the
+  terminal instead. The Music app does not take FLAC or Ogg; those are refused with a reason.
+  Turn on *Copy files to Music Media folder when adding to Library* in Music's settings, or
+  the Music app keeps pointing at the original file and Phoebus will not see the song.
+- **Linux, or any other root**: Phoebus copies the file to
+  `<root>/<Album Artist>/<Album>/<NN Title>.<ext>` — never overwriting an existing file —
+  and writes edits into the copy's tags.
+
+Either way the dropped original is never modified, and a file that already lives inside
+the library root is left alone (`ALREADY IN LIBRARY`). The list lasts for the session.
 
 ## Omarchy
 
@@ -96,7 +119,7 @@ lives in `assets/icon/` as SVG; `scripts/make-icons.sh` regenerates every raster
 ## What it does
 
 - **Views**: Recently Added, Artists, Albums, Songs (sortable, virtualized), per-album
-  pages, Playlists, live Search (`⌘F`).
+  pages, Playlists, live Search (`⌘F`), Import.
 - **Player**: play/pause, prev/next, seek, volume, shuffle, repeat (off/all/one),
   Up Next queue with Play Next / Play Later, playback history.
 - **Playlists**: create, rename inline, delete, reorder; add songs from any right-click
@@ -105,6 +128,12 @@ lives in `assets/icon/` as SVG; `scripts/make-icons.sh` regenerates every raster
   context; hand-queued songs always jump the line and survive context switches.
 - **Media keys & Now Playing**: hardware play/pause/next/prev, with title, artist and
   cover art in macOS Control Center (MPRIS on Linux).
+- **Import**: drop songs or whole album folders anywhere on the window. The Import view
+  lists each one as it is processed — cover, title, artist, album, and `QUEUED` /
+  `IMPORTING` / `IMPORTED` / `ALREADY IN LIBRARY` / why it failed — and `✎` on an imported
+  row edits title, artist, album, album artist, genre, year, track number and the cover
+  (drop a PNG or JPEG while the editor is open). The library rescans by itself when a batch
+  is done. See [Importing](#importing).
 - **Settings**: pick the library root (`~` expanded, applied with a rescan) and the look —
   dark or light, six accent presets or any colour you like. Applied live, saved on the spot.
 - **Resizable panels**: every vertical divider drags — the sidebar, the Up Next drawer and
@@ -113,7 +142,7 @@ lives in `assets/icon/` as SVG; `scripts/make-icons.sh` regenerates every raster
   launches.
 
 Keyboard: `Space` play/pause · `⌘F` search · `⌘←/→` prev/next · `⌘↑/↓` volume · `Esc`
-closes the queue drawer / leaves search. (`Ctrl` on Linux.)
+closes the queue drawer / the import editor / leaves search. (`Ctrl` on Linux.)
 
 ## Environment
 
