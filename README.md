@@ -67,7 +67,8 @@ Up Next, the player bar and Now Playing. An album whose songs carry different ar
 compilation, gets a four-tile mosaic of its first four covers on its card and page.
 `cache/covers/` keeps one PNG per distinct picture, named by a hash of its bytes: twenty
 songs with the same art share one file. Each scan writes the missing ones and deletes the
-ones no song uses any more.
+ones no song uses any more. A scan that finds no music (an unmounted drive, for example)
+leaves the cache as it is. Art other than PNG or JPEG is not shown.
 
 ## Omarchy
 
