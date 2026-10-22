@@ -669,7 +669,7 @@ impl State {
     }
 
     /// Fill the list with sample rows built from `library`, one of each status, with the
-    /// editor open on the first — the `--shot` tour's `import.png`. Nothing is sent to the
+    /// editor open on the first — the `--shot` tour's `settings-import.png`. Nothing is sent to the
     /// worker, and `SAVE` refuses sample rows.
     pub fn seed_demo(&mut self, library: &Library) {
         let statuses = [
