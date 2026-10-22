@@ -615,8 +615,8 @@ impl Phoebus {
         if self.vstate.playlist.close_picker() {
             return;
         }
-        // The import editor is the Import view's rename: an edit in progress, abandoned.
-        if self.view == View::Import && self.vstate.import.close_editor() {
+        // The import editor is the Settings view's rename: an edit in progress, abandoned.
+        if self.view == View::Settings && self.vstate.import.close_editor() {
             return;
         }
         if self.vstate.playlist.cancel_rename() {
@@ -787,15 +787,7 @@ impl Phoebus {
         });
         ui.scope_builder(egui::UiBuilder::new().max_rect(settings), |ui| {
             ui.add_space(theme::CARD_TEXT_GAP);
-            if nav_row(
-                ui,
-                "",
-                "SETTINGS",
-                self.view == View::Settings,
-                Row::Standalone,
-            )
-            .clicked()
-            {
+            if nav_row(ui, "SETTINGS", self.view == View::Settings, Row::Standalone).clicked() {
                 self.actions.push(Action::Go(View::Settings));
             }
         });
@@ -821,19 +813,15 @@ impl Phoebus {
         ui.add_space(theme::VIEW_PAD * 0.6);
 
         section_label(ui, "LIBRARY");
-        // `IMPORT` is the one row with a glyph: it is where songs come *from*, not a way
-        // of browsing them, and it carries its icon the way `+ NEW PLAYLIST` carries its
-        // `+` — an action-shaped row in a list of places.
-        for (icon, label, view) in [
-            ("", "RECENTLY ADDED", View::RecentlyAdded),
-            ("", "FAVORITES", View::Favorites),
-            ("", "ARTISTS", View::Artists),
-            ("", "ALBUMS", View::Albums),
-            ("", "SONGS", View::Songs),
-            (theme::GLYPH_IMPORT, "IMPORT", View::Import),
+        for (label, view) in [
+            ("RECENTLY ADDED", View::RecentlyAdded),
+            ("FAVORITES", View::Favorites),
+            ("ARTISTS", View::Artists),
+            ("ALBUMS", View::Albums),
+            ("SONGS", View::Songs),
         ] {
             let active = self.view == view;
-            if nav_row(ui, icon, label, active, Row::Item).clicked() {
+            if nav_row(ui, label, active, Row::Item).clicked() {
                 self.actions.push(Action::Go(view));
             }
         }
@@ -865,7 +853,7 @@ impl Phoebus {
                         continue;
                     }
                     let active = *view == View::Playlist(playlist.id);
-                    let response = nav_row(ui, "", &playlist.name, active, Row::Name);
+                    let response = nav_row(ui, &playlist.name, active, Row::Name);
                     if response.clicked() {
                         actions.push(Action::Go(View::Playlist(playlist.id)));
                     }
@@ -885,7 +873,7 @@ impl Phoebus {
                         });
                     });
                 }
-                if nav_row(ui, "", "+ NEW PLAYLIST", false, Row::Item).clicked() {
+                if nav_row(ui, "+ NEW PLAYLIST", false, Row::Item).clicked() {
                     actions.push(Action::NewPlaylist);
                 }
             });
@@ -996,16 +984,17 @@ impl Phoebus {
     }
 
     fn content(&mut self, ui: &mut Ui) {
-        // Import stays up through the rescan its own imports trigger: the list is what the
-        // user is watching, and swapping it for `SCANNING LIBRARY…` after every drop would
-        // hide the very rows that just turned `IMPORTED`. The view says it is rescanning.
-        if self.scan.is_some() && self.view != View::Import {
+        // Settings stays up through a scan: its IMPORT section is what the user watches
+        // while a drop is processed, and swapping it for `SCANNING LIBRARY…` after every
+        // drop would hide the very rows that just turned `IMPORTED`. The section says it is
+        // rescanning.
+        if self.scan.is_some() && self.view != View::Settings {
             self.scanning_note(ui);
             return;
         }
-        // Settings and Import are the two ways *out* of an empty library, so they must draw
-        // even when there is nothing to show anywhere else.
-        if self.library.is_empty() && !matches!(self.view, View::Settings | View::Import) {
+        // Settings is the way *out* of an empty library — a new root, or an import — so it
+        // must draw even when there is nothing to show anywhere else.
+        if self.library.is_empty() && self.view != View::Settings {
             let root = views::settings::display_path(&self.root);
             views::page(ui, |ui| {
                 views::centered_note(
@@ -1108,8 +1097,9 @@ impl Phoebus {
         ui.allocate_space(rect.size());
     }
 
-    /// Files dropped anywhere on the window go to the Import view, which comes up to show
-    /// them — the Apple Music behaviour, where the whole library window is a drop target.
+    /// Files dropped anywhere on the window are imported, and Settings comes up scrolled to
+    /// its IMPORT section to show them — the Apple Music behaviour, where the whole library
+    /// window is a drop target.
     fn take_drops(&mut self, ctx: &egui::Context) {
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
@@ -1119,7 +1109,8 @@ impl Phoebus {
                 .collect()
         });
         if self.vstate.import.drop_paths(ctx, &dropped) {
-            self.actions.push(Action::Go(View::Import));
+            self.vstate.import.reveal();
+            self.actions.push(Action::Go(View::Settings));
         }
     }
 
@@ -1243,11 +1234,12 @@ impl Phoebus {
                 self.view = View::Search;
             }
             Step::Settings => self.view = View::Settings,
-            // Sample rows, one per status, with the editor open: what an import session
-            // looks like, without importing anything.
-            Step::Import => {
+            // Settings again, scrolled to IMPORT, with sample rows (one per status) and the
+            // editor open: what an import session looks like, without importing anything.
+            Step::SettingsImport => {
                 self.vstate.import.seed_demo(&self.library);
-                self.view = View::Import;
+                self.vstate.import.reveal();
+                self.view = View::Settings;
             }
             Step::Playing => self.tour_playing(),
         }
@@ -1675,7 +1667,7 @@ fn section_label(ui: &mut Ui, text: &str) {
 /// stays welded to the panel edge — it marks the row, not the group. Welded, not flush:
 /// [`theme::ACTIVE_BAR_INSET`] leaves a sliver of panel to its left so the mark reads as
 /// sitting at the window's edge rather than as running off it.
-fn nav_row(ui: &mut Ui, icon: &str, label: &str, active: bool, kind: Row) -> egui::Response {
+fn nav_row(ui: &mut Ui, label: &str, active: bool, kind: Row) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(
         Vec2::new(ui.available_width(), theme::ROW_NAV),
         Sense::click(),
@@ -1704,26 +1696,14 @@ fn nav_row(ui: &mut Ui, icon: &str, label: &str, active: bool, kind: Row) -> egu
         widgets::spaced(label)
     };
     let indent = kind.indent();
-    if icon.is_empty() {
-        widgets::text_left(
-            ui,
-            egui::pos2(rect.left() + indent, rect.center().y),
-            &text,
-            theme::font_small(),
-            color,
-            rect.width() - indent,
-        );
-    } else {
-        let galley = widgets::icon_text(ui, icon, theme::ICON_INLINE, &text, theme::font_small());
-        ui.painter().galley(
-            egui::pos2(
-                rect.left() + indent,
-                rect.center().y - galley.size().y * 0.5,
-            ),
-            galley,
-            color,
-        );
-    }
+    widgets::text_left(
+        ui,
+        egui::pos2(rect.left() + indent, rect.center().y),
+        &text,
+        theme::font_small(),
+        color,
+        rect.width() - indent,
+    );
     response
 }
 
@@ -2016,17 +1996,15 @@ mod tests {
     /// indent and the panel's two paddings.
     #[test]
     fn the_sidebar_floor_fits_its_longest_nav_row() {
-        /// Every label the sidebar lays out at `font_small()`, longest first, with the
-        /// glyph the row carries (only `IMPORT` has one, and it counts toward the width).
-        const ROWS: [(&str, &str); 8] = [
-            ("", "RECENTLY ADDED"),
-            ("", "+ NEW PLAYLIST"),
-            ("", "FAVORITES"),
-            ("", "SETTINGS"),
-            ("", "ARTISTS"),
-            (theme::GLYPH_IMPORT, "IMPORT"),
-            ("", "ALBUMS"),
-            ("", "SONGS"),
+        /// Every label the sidebar lays out at `font_small()`, longest first.
+        const ROWS: [&str; 7] = [
+            "RECENTLY ADDED",
+            "+ NEW PLAYLIST",
+            "FAVORITES",
+            "SETTINGS",
+            "ARTISTS",
+            "ALBUMS",
+            "SONGS",
         ];
 
         let ctx = egui::Context::default();
@@ -2040,13 +2018,11 @@ mod tests {
             ..Default::default()
         };
         let mut out = ctx.run_ui(input, |ui| {
-            for (icon, label) in ROWS {
-                let galley = widgets::icon_text(
-                    ui,
-                    icon,
-                    theme::ICON_INLINE,
-                    &widgets::spaced(label),
+            for label in ROWS {
+                let galley = ui.painter().layout_no_wrap(
+                    widgets::spaced(label),
                     theme::font_small(),
+                    Color32::WHITE,
                 );
                 if galley.size().x > widest.0 {
                     widest = (galley.size().x, label);

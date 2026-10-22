@@ -1,15 +1,18 @@
-//! The Import view: a wide drop field on top, and under it the list of everything dropped
-//! this session — cover, title, artist, album, and where each one stands.
+//! Settings' IMPORT section: a wide drop field on top, and under it the list of
+//! everything dropped this session — cover, title, artist, album, and where each one
+//! stands. It lives in Settings, between LIBRARY and THEME, because importing is the other
+//! way of putting music into the library the LIBRARY section points at.
 //!
 //! ## What a drop does
 //!
-//! Audio files and folders dropped anywhere on the window are imported (the app hands them
-//! over through [`State::drop_paths`] and brings this view up); folders are walked like the
-//! scanner walks the library, on a side thread — a dropped folder can be huge or on a
-//! network share, and the window must not freeze for it. Anything that is neither audio nor a cover candidate is
+//! Audio files and folders dropped anywhere on the window are imported: the app hands them
+//! over through [`State::drop_paths`], opens Settings, and asks this section to scroll
+//! itself into view once ([`State::reveal`]). Folders are walked like the scanner walks the
+//! library, on a side thread — a dropped folder can be huge or on a network share, and the
+//! window must not freeze for it. Anything that is neither audio nor a cover candidate is
 //! counted and named under the field instead of silently ignored. How a file gets into the
-//! library — the Music app or a copy — is [`phoebus_core::import`]'s business; this view
-//! only says which, in the line under the heading.
+//! library — the Music app or a copy — is [`phoebus_core::import`]'s business; this
+//! section only says which, in the line under its label.
 //!
 //! ## Editing
 //!
@@ -40,7 +43,6 @@ use phoebus_core::{AlbumKey, Library};
 
 use crate::artwork::{self, Artwork};
 use crate::importer::{CoverId, Job, Reply, RowId, SideJob, Worker};
-use crate::nav::Ctx;
 use crate::theme;
 use crate::views;
 use crate::widgets;
@@ -235,6 +237,9 @@ pub struct State {
     listed: HashSet<PathBuf>,
     /// One texture per distinct cover, shared by every row that shows it.
     textures: HashMap<CoverId, TextureHandle>,
+    /// Scroll the section into view on the next frame it is drawn — set by a drop, so
+    /// the user sees where the files went; consumed by that frame.
+    reveal: bool,
     /// The hovered paths [`State::hover`] last looked at, and what it made of them.
     hover_key: Vec<Option<PathBuf>>,
     hover: Hover,
@@ -256,6 +261,7 @@ impl Default for State {
             editor: None,
             listed: HashSet::new(),
             textures: HashMap::new(),
+            reveal: false,
             hover_key: Vec::new(),
             hover: Hover::default(),
         }
@@ -512,6 +518,11 @@ impl State {
                 }
             }
         }
+    }
+
+    /// Have the section scroll itself into view the next time it is drawn — once.
+    pub fn reveal(&mut self) {
+        self.reveal = true;
     }
 
     /// `Esc`: close the row editor, unsaved changes and all. `true` if one was open.
@@ -783,31 +794,40 @@ impl Hover {
     }
 }
 
-/// Draw the view.
-pub fn show(ui: &mut Ui, cx: &mut Ctx, st: &mut State) {
+/// Draw the IMPORT section into the Settings page (which does the scrolling).
+pub fn section(ui: &mut Ui, art: &mut Artwork, st: &mut State) {
+    let top = ui.cursor().min;
+    views::section(ui, "IMPORT");
+    if std::mem::take(&mut st.reveal) {
+        // Instantly, not animated: the drop that asked for it is already done, and the
+        // screenshot tour photographs the very next settled frames.
+        let anchor = Rect::from_min_size(top, Vec2::new(ui.available_width(), 1.0));
+        ui.scroll_to_rect_animation(
+            anchor,
+            Some(egui::Align::TOP),
+            egui::style::ScrollAnimation::none(),
+        );
+    }
     let hover = st.hover(ui.ctx());
-    views::page(ui, |ui| {
-        views::heading(ui, "IMPORT");
-        views::subheading(ui, &mode_line(&st.root, st.mode, st.scanning));
-        ui.add_space(theme::CARD_TEXT_GAP * 1.5);
-        drop_zone(ui, st.editor.is_some(), hover);
-        if st.walking > 0 {
-            ui.add_space(theme::CARD_TEXT_GAP);
-            views::subheading(ui, &widgets::spaced("LOOKING THROUGH THE DROP…"));
-        } else if let Some(notice) = &st.notice {
-            ui.add_space(theme::CARD_TEXT_GAP);
-            views::subheading(ui, notice);
-        }
-        ui.add_space(theme::SECTION_GAP);
-        list(ui, cx.art, st, hover);
-    });
+    views::subheading(ui, &mode_line(&st.root, st.mode, st.scanning));
+    ui.add_space(theme::CARD_TEXT_GAP * 1.5);
+    drop_zone(ui, st.editor.is_some(), hover);
+    if st.walking > 0 {
+        ui.add_space(theme::CARD_TEXT_GAP);
+        views::subheading(ui, &widgets::spaced("LOOKING THROUGH THE DROP…"));
+    } else if let Some(notice) = &st.notice {
+        ui.add_space(theme::CARD_TEXT_GAP);
+        views::subheading(ui, notice);
+    }
+    ui.add_space(theme::SECTION_GAP);
+    list(ui, art, st, hover);
     if st.busy() {
         ui.ctx()
             .request_repaint_after(Duration::from_millis(SPIN_MS));
     }
 }
 
-/// The line under the heading: where new songs go, and through what.
+/// The line under the section label: where new songs go, and through what.
 fn mode_line(root: &Path, mode: Mode, scanning: bool) -> String {
     let shown = views::settings::display_path(root);
     let mut line = match mode {
@@ -932,7 +952,7 @@ enum Click {
     Clear,
 }
 
-/// The header, then every row (and the open editor under its row), in a scroller.
+/// The header, then every row, and the open editor under its row.
 fn list(ui: &mut Ui, art: &mut Artwork, st: &mut State, hover: Hover) {
     let mut clicks: Vec<Click> = Vec::new();
     let (done, total) = st.progress();
@@ -951,25 +971,22 @@ fn list(ui: &mut Ui, art: &mut Artwork, st: &mut State, hover: Hover) {
         );
     }
 
+    // No scroller of its own: the Settings page scrolls, and a scroller inside a
+    // scroller would trap the wheel.
     let spin = spinner(ui);
-    egui::ScrollArea::vertical()
-        .id_salt("import-rows")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            let State { rows, editor, .. } = st;
-            for row in rows.iter() {
-                let editing = editor.as_ref().is_some_and(|e| e.id == row.id);
-                if row_ui(ui, art, row, editing, spin) {
-                    clicks.push(Click::Edit(row.id));
-                }
-                if editing && let Some(ed) = editor.as_mut() {
-                    let saving = row.saving.is_some();
-                    if let Some(click) = editor_ui(ui, art, row, ed, saving, hover) {
-                        clicks.push(click);
-                    }
-                }
+    let State { rows, editor, .. } = &mut *st;
+    for row in rows.iter() {
+        let editing = editor.as_ref().is_some_and(|e| e.id == row.id);
+        if row_ui(ui, art, row, editing, spin) {
+            clicks.push(Click::Edit(row.id));
+        }
+        if editing && let Some(ed) = editor.as_mut() {
+            let saving = row.saving.is_some();
+            if let Some(click) = editor_ui(ui, art, row, ed, saving, hover) {
+                clicks.push(click);
             }
-        });
+        }
+    }
 
     let ctx = ui.ctx().clone();
     for click in clicks {

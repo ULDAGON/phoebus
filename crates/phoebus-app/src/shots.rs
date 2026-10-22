@@ -188,9 +188,10 @@ pub enum Step {
     Search,
     /// `settings.png` — the Settings view in its default state.
     Settings,
-    /// `import.png` — the Import view with sample rows (one per status) and the row
-    /// editor open. Nothing is imported: the rows are built from the library itself.
-    Import,
+    /// `settings-import.png` — Settings scrolled to its IMPORT section, with sample rows
+    /// (one per status) and the row editor open. Nothing is imported: the rows are built
+    /// from the library itself.
+    SettingsImport,
     /// `playing.png` — loaded, paused, queue drawer open.
     Playing,
 }
@@ -209,7 +210,7 @@ impl Step {
         Step::AddSongs,
         Step::Search,
         Step::Settings,
-        Step::Import,
+        Step::SettingsImport,
         Step::Playing,
     ];
 
@@ -226,7 +227,7 @@ impl Step {
             Step::AddSongs => "add-songs",
             Step::Search => "search",
             Step::Settings => "settings",
-            Step::Import => "import",
+            Step::SettingsImport => "settings-import",
             Step::Playing => "playing",
         }
     }

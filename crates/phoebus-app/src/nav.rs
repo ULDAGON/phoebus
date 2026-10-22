@@ -32,10 +32,8 @@ pub enum View {
     Playlist(u64),
     /// Live search results (C2).
     Search,
-    /// Library root + theme settings.
+    /// Library root, importing new songs, and the theme.
     Settings,
-    /// The drop field for new songs and the list of what was imported this session.
-    Import,
 }
 
 impl View {
@@ -51,7 +49,6 @@ impl View {
             View::Playlist(id) => format!("playlist:{id}"),
             View::Search => "search".to_string(),
             View::Settings => "settings".to_string(),
-            View::Import => "import".to_string(),
         }
     }
 
@@ -76,8 +73,9 @@ impl View {
             "albums" => View::Albums,
             "artists" => View::Artists,
             "songs" => View::Songs,
-            "settings" => View::Settings,
-            "import" => View::Import,
+            // `import` was a page of its own in the first build of the importer, and a
+            // `state.json` it wrote may still say so; importing lives in Settings now.
+            "settings" | "import" => View::Settings,
             _ => View::RecentlyAdded,
         }
     }
@@ -365,12 +363,16 @@ mod tests {
             View::Songs,
             View::Playlist(7),
             View::Settings,
-            View::Import,
             View::Album(AlbumKey::new("HOME", "Odyssey")),
         ] {
             assert_eq!(View::from_state(&v.to_state()), v);
         }
         assert_eq!(View::from_state("nonsense"), View::RecentlyAdded);
+        assert_eq!(
+            View::from_state("import"),
+            View::Settings,
+            "a state.json from the build with an Import page reopens where import lives now"
+        );
         assert_eq!(View::from_state("playlist:xx"), View::RecentlyAdded);
     }
 

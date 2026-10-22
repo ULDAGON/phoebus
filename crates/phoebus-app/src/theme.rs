@@ -850,10 +850,10 @@ pub const PLAYLIST_ART: f32 = 36.0;
 /// Vertical gap between the sections of the Search view.
 pub const SECTION_GAP: f32 = 20.0;
 
-/// Height of the Import view's drop field. Tall enough to be the obvious target at a
-/// glance from across the window, short enough to leave most of a `WINDOW_MIN`-tall window
-/// to the list of what was imported.
-pub const DROP_ZONE_H: f32 = 168.0;
+/// Height of the drop field in Settings' IMPORT section. Still the obvious target at a
+/// glance, but a section among sections: short enough that the rows under it and the
+/// section's neighbours stay in view.
+pub const DROP_ZONE_H: f32 = 120.0;
 /// The import drop field's glyph.
 pub const ICON_DROP: f32 = 36.0;
 /// Cover square in the Import view's row editor — the drop target for a new cover, so it
@@ -1094,7 +1094,7 @@ pub const GLYPH_CLOSE: &str = "\u{e4f6}";
 /// the same in either face — which is exactly why they cannot share a family
 /// (see [`install_fonts`]).
 pub const GLYPH_HEART: &str = "\u{e2a8}";
-/// Import — `tray-arrow-down`, U+E010. The sidebar row and the drop field: something
+/// Import — `tray-arrow-down`, U+E010. The drop field in Settings: something
 /// arriving into a container is what an import is, and unlike `download-simple` it does
 /// not suggest a network.
 pub const GLYPH_IMPORT: &str = "\u{e010}";

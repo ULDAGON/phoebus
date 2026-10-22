@@ -46,7 +46,8 @@ pub struct ViewState {
     pub search: search::State,
     /// Settings (the library-root input and its inline error).
     pub settings: settings::State,
-    /// Import: the session's drops, their worker, and the open row editor. Never touched
+    /// Settings' IMPORT section: the session's drops, their worker, and the open row
+    /// editor. Never touched
     /// by [`ViewState::library_changed`] — a rescan is what an import *causes*, and the
     /// list has to outlive it.
     pub import: import::State,
@@ -99,8 +100,7 @@ pub fn route(
         View::Songs => songs::show(ui, cx, &mut st.songs),
         View::Playlist(id) => playlist::show(ui, cx, &mut st.playlist, *id, top),
         View::Search => search::show(ui, cx, &mut st.search, query),
-        View::Settings => settings::show(ui, cx, &mut st.settings, settings),
-        View::Import => import::show(ui, cx, &mut st.import),
+        View::Settings => settings::show(ui, cx, &mut st.settings, &mut st.import, settings),
     }
 }
 
@@ -463,6 +463,56 @@ mod tests {
         }
     }
 
+    /// A drop opens Settings scrolled to IMPORT — once. The next frames leave the scroll
+    /// to the user: wheeling back up must stay up, not snap back to the section.
+    #[test]
+    fn a_reveal_scrolls_settings_to_import_exactly_once() {
+        let lib = library();
+        let pls: Vec<Playlist> = Vec::new();
+        let data = (&lib, pls.as_slice());
+        let label = widgets::spaced("IMPORT");
+        let y = |mark: &str| -> f32 {
+            mark.rsplit(" at ")
+                .next()
+                .and_then(|n| n.parse().ok())
+                .expect("a mark with a y")
+        };
+        let ctx = egui::Context::default();
+        let mut st = ViewState::default();
+        st.import.seed_demo(&lib);
+
+        let resting = y(&page_mark(
+            &ctx,
+            (&View::Settings, false, 0.0),
+            data,
+            &mut st,
+            &label,
+        ));
+        st.import.reveal();
+        let revealed = y(&page_mark(
+            &ctx,
+            (&View::Settings, false, 0.0),
+            data,
+            &mut st,
+            &label,
+        ));
+        assert!(
+            revealed < resting && revealed < theme::VIEW_PAD * 2.0,
+            "IMPORT is at the top after a reveal ({resting} -> {revealed})"
+        );
+        let wheeled = y(&page_mark(
+            &ctx,
+            (&View::Settings, false, -2000.0),
+            data,
+            &mut st,
+            &label,
+        ));
+        assert_eq!(
+            wheeled, resting,
+            "the reveal was spent; the user scrolled back up"
+        );
+    }
+
     #[test]
     fn every_view_lays_itself_out() {
         let lib = library();
@@ -484,8 +534,6 @@ mod tests {
             // is laid out too.
             (View::Search, "o"),
             (View::Settings, ""),
-            // Empty: the drop field and `NOTHING YET`.
-            (View::Import, ""),
         ] {
             render(&view, query, &mut st, &lib, &pls);
         }
@@ -508,7 +556,6 @@ mod tests {
             (View::Playlist(404), ""),
             (View::Search, "zzz"),
             (View::Settings, ""),
-            (View::Import, ""),
         ] {
             render(&view, query, &mut st, &lib, &[]);
         }
@@ -686,33 +733,39 @@ mod tests {
         texts
     }
 
-    /// The Import view populated the way the tour shows it — one sample row per status,
-    /// the editor open — laid out idle, with songs hovering (the drop field lights up and
-    /// says what letting go does) and with an image hovering (the editor's cover does).
+    /// Settings' IMPORT section populated the way the tour shows it — one sample row per
+    /// status, the editor open — laid out idle, with songs hovering (the drop field lights
+    /// up and says what letting go does) and with an image hovering (the editor's cover
+    /// does). The LIBRARY section is still there above it.
     #[test]
-    fn the_import_view_lays_out_its_rows_editor_and_both_drop_targets() {
+    fn settings_lays_out_its_import_section_rows_editor_and_both_drop_targets() {
         let lib = library();
         let has = |texts: &[String], needle: &str| texts.iter().any(|t| t.contains(needle));
         let mut st = ViewState::default();
         st.import.seed_demo(&lib);
 
-        let idle = texts_while_hovering(&View::Import, &mut st, &lib, &[]);
+        let idle = texts_while_hovering(&View::Settings, &mut st, &lib, &[]);
+        // THEME is further down, below the open editor, and egui paints nothing outside
+        // the scroller's viewport — `every_view_lays_itself_out` covers it.
+        for section in ["LIBRARY", "IMPORT"] {
+            assert!(has(&idle, &widgets::spaced(section)), "{section}");
+        }
         assert!(has(&idle, &widgets::spaced("DROP SONGS OR ALBUMS HERE")));
         assert!(has(&idle, &widgets::spaced("SAVE")), "the editor is open");
         assert!(has(&idle, "Intro"), "the rows are drawn");
         assert!(has(&idle, &widgets::spaced("MUSIC APP REFUSED")));
         assert!(has(&idle, &widgets::spaced("DROP AN IMAGE")), "untruncated");
 
-        let songs = texts_while_hovering(&View::Import, &mut st, &lib, &["/x/a.mp3", "/x/b.m4a"]);
+        let songs = texts_while_hovering(&View::Settings, &mut st, &lib, &["/x/a.mp3", "/x/b.m4a"]);
         assert!(has(&songs, &widgets::spaced("RELEASE TO IMPORT 2 ITEMS")));
 
-        let cover = texts_while_hovering(&View::Import, &mut st, &lib, &["/x/cover.png"]);
+        let cover = texts_while_hovering(&View::Settings, &mut st, &lib, &["/x/cover.png"]);
         assert!(has(&cover, &widgets::spaced("RELEASE TO USE")));
         assert!(!has(&cover, &widgets::spaced("RELEASE TO IMPORT")));
 
         // With no editor open an image has nowhere to go, and the field says so.
         assert!(st.import.close_editor());
-        let lost = texts_while_hovering(&View::Import, &mut st, &lib, &["/x/cover.png"]);
+        let lost = texts_while_hovering(&View::Settings, &mut st, &lib, &["/x/cover.png"]);
         assert!(has(
             &lost,
             &widgets::spaced("OPEN A SONG WITH ✎ TO DROP A COVER ON IT")
@@ -720,7 +773,7 @@ mod tests {
 
         // A rescan leaves the session's list alone.
         st.library_changed();
-        let after = texts_while_hovering(&View::Import, &mut st, &lib, &[]);
+        let after = texts_while_hovering(&View::Settings, &mut st, &lib, &[]);
         assert!(has(&after, "Intro"));
     }
 
