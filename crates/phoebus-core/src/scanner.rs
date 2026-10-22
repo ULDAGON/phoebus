@@ -24,7 +24,7 @@ use crate::paths;
 pub const AUDIO_EXTENSIONS: &[&str] = &["m4a", "mp3", "flac", "ogg", "wav", "aiff", "aac"];
 
 /// Deepest directory nesting the walker descends into.
-const MAX_DEPTH: usize = 8;
+pub(crate) const MAX_DEPTH: usize = 8;
 
 /// Longest edge of a cached cover PNG, in pixels.
 pub const COVER_MAX_EDGE: u32 = 600;
@@ -166,11 +166,11 @@ fn is_hidden(entry: &DirEntry) -> bool {
 /// first *byte* is inspected: ext4/xfs/btrfs accept any byte sequence in a name, and
 /// treating "not valid UTF-8" as "hidden" silently deleted whole artists from the library
 /// (a Latin-1 `Björk/` directory and everything under it).
-fn name_is_hidden(name: &OsStr) -> bool {
+pub(crate) fn name_is_hidden(name: &OsStr) -> bool {
     name.as_encoded_bytes().first() == Some(&b'.')
 }
 
-fn has_audio_extension(path: &Path) -> bool {
+pub(crate) fn has_audio_extension(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase)
@@ -240,14 +240,14 @@ fn read_track(root: &Path, path: &Path) -> Option<Track> {
     Some(track)
 }
 
-fn text(v: Option<&str>) -> Option<String> {
+pub(crate) fn text(v: Option<&str>) -> Option<String> {
     v.map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
 }
 
 /// Pull a 4-digit year out of a date string like `2021` or `2021-06-01`.
-fn parse_year(s: &str) -> Option<u32> {
+pub(crate) fn parse_year(s: &str) -> Option<u32> {
     let digits: String = s.chars().take_while(char::is_ascii_digit).collect();
     digits.parse().ok().filter(|y| (1000..=9999).contains(y))
 }
@@ -327,7 +327,7 @@ fn is_cover_current(dest: &Path, source_mtime: SystemTime) -> bool {
 }
 
 /// The first embedded picture of a file, whatever its `PictureType`.
-fn first_picture(path: &Path) -> Option<Vec<u8>> {
+pub(crate) fn first_picture(path: &Path) -> Option<Vec<u8>> {
     let tagged = lofty::read_from_path(path).ok()?;
     let tag: &Tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
     let pic = tag.pictures().first()?;

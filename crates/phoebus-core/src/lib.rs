@@ -35,6 +35,7 @@
 
 pub mod color;
 pub mod favorites;
+pub mod import;
 pub mod model;
 pub mod paths;
 pub mod playlists;
