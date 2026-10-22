@@ -34,6 +34,8 @@ pub enum View {
     Search,
     /// Library root + theme settings.
     Settings,
+    /// The drop field for new songs and the list of what was imported this session.
+    Import,
 }
 
 impl View {
@@ -49,6 +51,7 @@ impl View {
             View::Playlist(id) => format!("playlist:{id}"),
             View::Search => "search".to_string(),
             View::Settings => "settings".to_string(),
+            View::Import => "import".to_string(),
         }
     }
 
@@ -74,6 +77,7 @@ impl View {
             "artists" => View::Artists,
             "songs" => View::Songs,
             "settings" => View::Settings,
+            "import" => View::Import,
             _ => View::RecentlyAdded,
         }
     }
@@ -180,7 +184,10 @@ pub enum Action {
     CycleRepeat,
     /// Show / hide the Up Next drawer.
     ToggleQueue,
-    /// Settings: re-run the library scan over the root already in force.
+    /// Settings: re-run the library scan over the root already in force. Also raised by
+    /// the Import view once a batch has landed. Asked for while a scan is running, it
+    /// runs again when that one is done — the files just imported may have arrived after
+    /// the running scan walked past their folder.
     Rescan,
     /// Settings: adopt a library root (as typed, `~` allowed) and rescan. `None` restores
     /// the default `~/.phoebus`. A path that is not a directory is refused, and the view
@@ -358,6 +365,7 @@ mod tests {
             View::Songs,
             View::Playlist(7),
             View::Settings,
+            View::Import,
             View::Album(AlbumKey::new("HOME", "Odyssey")),
         ] {
             assert_eq!(View::from_state(&v.to_state()), v);

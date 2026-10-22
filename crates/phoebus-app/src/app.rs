@@ -66,6 +66,8 @@ pub struct Phoebus {
     library: Library,
     fmt: Fmt,
     scan: Option<Scan>,
+    /// A rescan was asked for while a scan was running: run one more when it finishes.
+    rescan_queued: bool,
     artwork: Artwork,
     controller: Controller,
     /// OS media keys and the Now Playing card. Disabled, never absent, if the platform
@@ -148,6 +150,7 @@ impl Phoebus {
             dirs,
             fmt: Fmt::default(),
             scan: None,
+            rescan_queued: false,
             artwork: Artwork::new(),
             controller,
             media_keys: MediaKeys::new(&cc.egui_ctx),
@@ -178,6 +181,8 @@ impl Phoebus {
         // its width is seeded into `ViewState` here instead and travels back out as an
         // `Action::SetArtistListW`.
         app.vstate.artists.list_w = app.controller.artist_list_w();
+        // Where the Import view sends new songs; kept in step by `set_library_root`.
+        app.vstate.import.root = app.root.clone();
         // Before the first frame: nothing above this line paints.
         if app.external.is_some() && app.controller.follow_desktop_theme() {
             app.apply_external(&cc.egui_ctx);
@@ -366,6 +371,22 @@ impl Phoebus {
             // Sort orders, search hits, artist indices and both favourites caches all
             // referred to the old library.
             self.vstate.library_changed();
+            if std::mem::take(&mut self.rescan_queued) {
+                self.start_scan();
+            }
+        }
+    }
+
+    /// `Action::Rescan`: scan now, or right after the scan that is already running.
+    ///
+    /// Not simply `start_scan`, which ignores a request while a scan runs. That is right
+    /// for the scan's own start-up, and wrong for an import: the songs it just filed may
+    /// sit in a folder the running scan has already walked past.
+    fn request_scan(&mut self) {
+        if self.scan.is_some() {
+            self.rescan_queued = true;
+        } else {
+            self.start_scan();
         }
     }
 
@@ -469,7 +490,7 @@ impl Phoebus {
             Action::ToggleShuffle => self.controller.toggle_shuffle(),
             Action::CycleRepeat => self.controller.cycle_repeat(),
             Action::ToggleQueue => self.queue_open = !self.queue_open,
-            Action::Rescan => self.start_scan(),
+            Action::Rescan => self.request_scan(),
             Action::SetLibraryRoot(typed) => self.set_library_root(typed),
             Action::SetThemeMode(mode) => {
                 let accent = theme::p().accent;
@@ -518,6 +539,7 @@ impl Phoebus {
 
         self.controller.stop();
         self.root = root;
+        self.vstate.import.root = self.root.clone();
         self.library = Library::empty_with_covers(&self.root, self.dirs.covers_dir());
         // Nothing resolves against an empty library; the scan below resolves them again.
         self.controller.favorites.resolve(&self.library);
@@ -591,6 +613,10 @@ impl Phoebus {
     /// *consumes* the key, which would take this ordering apart from the inside.
     fn escape(&mut self) {
         if self.vstate.playlist.close_picker() {
+            return;
+        }
+        // The import editor is the Import view's rename: an edit in progress, abandoned.
+        if self.view == View::Import && self.vstate.import.close_editor() {
             return;
         }
         if self.vstate.playlist.cancel_rename() {
@@ -761,7 +787,15 @@ impl Phoebus {
         });
         ui.scope_builder(egui::UiBuilder::new().max_rect(settings), |ui| {
             ui.add_space(theme::CARD_TEXT_GAP);
-            if nav_row(ui, "SETTINGS", self.view == View::Settings, Row::Standalone).clicked() {
+            if nav_row(
+                ui,
+                "",
+                "SETTINGS",
+                self.view == View::Settings,
+                Row::Standalone,
+            )
+            .clicked()
+            {
                 self.actions.push(Action::Go(View::Settings));
             }
         });
@@ -787,15 +821,19 @@ impl Phoebus {
         ui.add_space(theme::VIEW_PAD * 0.6);
 
         section_label(ui, "LIBRARY");
-        for (label, view) in [
-            ("RECENTLY ADDED", View::RecentlyAdded),
-            ("FAVORITES", View::Favorites),
-            ("ARTISTS", View::Artists),
-            ("ALBUMS", View::Albums),
-            ("SONGS", View::Songs),
+        // `IMPORT` is the one row with a glyph: it is where songs come *from*, not a way
+        // of browsing them, and it carries its icon the way `+ NEW PLAYLIST` carries its
+        // `+` — an action-shaped row in a list of places.
+        for (icon, label, view) in [
+            ("", "RECENTLY ADDED", View::RecentlyAdded),
+            ("", "FAVORITES", View::Favorites),
+            ("", "ARTISTS", View::Artists),
+            ("", "ALBUMS", View::Albums),
+            ("", "SONGS", View::Songs),
+            (theme::GLYPH_IMPORT, "IMPORT", View::Import),
         ] {
             let active = self.view == view;
-            if nav_row(ui, label, active, Row::Item).clicked() {
+            if nav_row(ui, icon, label, active, Row::Item).clicked() {
                 self.actions.push(Action::Go(view));
             }
         }
@@ -827,7 +865,7 @@ impl Phoebus {
                         continue;
                     }
                     let active = *view == View::Playlist(playlist.id);
-                    let response = nav_row(ui, &playlist.name, active, Row::Name);
+                    let response = nav_row(ui, "", &playlist.name, active, Row::Name);
                     if response.clicked() {
                         actions.push(Action::Go(View::Playlist(playlist.id)));
                     }
@@ -847,7 +885,7 @@ impl Phoebus {
                         });
                     });
                 }
-                if nav_row(ui, "+ NEW PLAYLIST", false, Row::Item).clicked() {
+                if nav_row(ui, "", "+ NEW PLAYLIST", false, Row::Item).clicked() {
                     actions.push(Action::NewPlaylist);
                 }
             });
@@ -958,13 +996,16 @@ impl Phoebus {
     }
 
     fn content(&mut self, ui: &mut Ui) {
-        if self.scan.is_some() {
+        // Import stays up through the rescan its own imports trigger: the list is what the
+        // user is watching, and swapping it for `SCANNING LIBRARY…` after every drop would
+        // hide the very rows that just turned `IMPORTED`. The view says it is rescanning.
+        if self.scan.is_some() && self.view != View::Import {
             self.scanning_note(ui);
             return;
         }
-        // The Settings view is the way *out* of an empty library, so it must draw even when
-        // there is nothing to show anywhere else.
-        if self.library.is_empty() && self.view != View::Settings {
+        // Settings and Import are the two ways *out* of an empty library, so they must draw
+        // even when there is nothing to show anywhere else.
+        if self.library.is_empty() && !matches!(self.view, View::Settings | View::Import) {
             let root = views::settings::display_path(&self.root);
             views::page(ui, |ui| {
                 views::centered_note(
@@ -975,6 +1016,8 @@ impl Phoebus {
                         "",
                         "EXPECTED LAYOUT: ARTIST / ALBUM / TRACK.M4A",
                         "SUPPORTED: M4A MP3 FLAC OGG WAV AIFF AAC",
+                        "",
+                        "OR DROP SONGS ON THIS WINDOW TO IMPORT THEM",
                     ],
                 );
             });
@@ -1063,6 +1106,21 @@ impl Phoebus {
             theme::p().text_low,
         );
         ui.allocate_space(rect.size());
+    }
+
+    /// Files dropped anywhere on the window go to the Import view, which comes up to show
+    /// them — the Apple Music behaviour, where the whole library window is a drop target.
+    fn take_drops(&mut self, ctx: &egui::Context) {
+        let dropped: Vec<PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .collect()
+        });
+        if self.vstate.import.drop_paths(ctx, &dropped) {
+            self.actions.push(Action::Go(View::Import));
+        }
     }
 
     // ---- screenshots -----------------------------------------------------------------
@@ -1185,6 +1243,12 @@ impl Phoebus {
                 self.view = View::Search;
             }
             Step::Settings => self.view = View::Settings,
+            // Sample rows, one per status, with the editor open: what an import session
+            // looks like, without importing anything.
+            Step::Import => {
+                self.vstate.import.seed_demo(&self.library);
+                self.view = View::Import;
+            }
             Step::Playing => self.tour_playing(),
         }
         if let Some(tour) = &mut self.tour {
@@ -1440,6 +1504,13 @@ impl eframe::App for Phoebus {
         // pause pressed in the background would otherwise sit queued (audibly ignored)
         // until the window next opened. `apply_actions` is a no-op when nothing queued.
         self.media_keys.poll(&self.controller, &mut self.actions);
+        // Finished imports, collected here rather than in `ui` for the same reason: the
+        // worker keeps going while the window is hidden, and the rescan it asks for must
+        // not wait for the window to come back.
+        self.vstate.import.scanning = self.scan.is_some();
+        if self.vstate.import.poll(ctx) {
+            self.actions.push(Action::Rescan);
+        }
         // Widget requests (queue jump, shuffle) are actions on the same terms, and
         // for the same reason: only `logic` runs while the window is hidden.
         self.remote.poll(&mut self.actions);
@@ -1472,6 +1543,7 @@ impl eframe::App for Phoebus {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.controller.shortcuts(&ctx, &mut self.actions);
+        self.take_drops(&ctx);
 
         // FIRST, so it spans the full window width and everything else stacks above it
         // (UI-SPEC §Layout). egui hands each panel what is left of the parent rect, so
@@ -1603,7 +1675,7 @@ fn section_label(ui: &mut Ui, text: &str) {
 /// stays welded to the panel edge — it marks the row, not the group. Welded, not flush:
 /// [`theme::ACTIVE_BAR_INSET`] leaves a sliver of panel to its left so the mark reads as
 /// sitting at the window's edge rather than as running off it.
-fn nav_row(ui: &mut Ui, label: &str, active: bool, kind: Row) -> egui::Response {
+fn nav_row(ui: &mut Ui, icon: &str, label: &str, active: bool, kind: Row) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(
         Vec2::new(ui.available_width(), theme::ROW_NAV),
         Sense::click(),
@@ -1632,14 +1704,26 @@ fn nav_row(ui: &mut Ui, label: &str, active: bool, kind: Row) -> egui::Response 
         widgets::spaced(label)
     };
     let indent = kind.indent();
-    widgets::text_left(
-        ui,
-        egui::pos2(rect.left() + indent, rect.center().y),
-        &text,
-        theme::font_small(),
-        color,
-        rect.width() - indent,
-    );
+    if icon.is_empty() {
+        widgets::text_left(
+            ui,
+            egui::pos2(rect.left() + indent, rect.center().y),
+            &text,
+            theme::font_small(),
+            color,
+            rect.width() - indent,
+        );
+    } else {
+        let galley = widgets::icon_text(ui, icon, theme::ICON_INLINE, &text, theme::font_small());
+        ui.painter().galley(
+            egui::pos2(
+                rect.left() + indent,
+                rect.center().y - galley.size().y * 0.5,
+            ),
+            galley,
+            color,
+        );
+    }
     response
 }
 
@@ -1932,15 +2016,17 @@ mod tests {
     /// indent and the panel's two paddings.
     #[test]
     fn the_sidebar_floor_fits_its_longest_nav_row() {
-        /// Every label the sidebar lays out at `font_small()`, longest first.
-        const ROWS: [&str; 7] = [
-            "RECENTLY ADDED",
-            "+ NEW PLAYLIST",
-            "FAVORITES",
-            "SETTINGS",
-            "ARTISTS",
-            "ALBUMS",
-            "SONGS",
+        /// Every label the sidebar lays out at `font_small()`, longest first, with the
+        /// glyph the row carries (only `IMPORT` has one, and it counts toward the width).
+        const ROWS: [(&str, &str); 8] = [
+            ("", "RECENTLY ADDED"),
+            ("", "+ NEW PLAYLIST"),
+            ("", "FAVORITES"),
+            ("", "SETTINGS"),
+            ("", "ARTISTS"),
+            (theme::GLYPH_IMPORT, "IMPORT"),
+            ("", "ALBUMS"),
+            ("", "SONGS"),
         ];
 
         let ctx = egui::Context::default();
@@ -1954,11 +2040,13 @@ mod tests {
             ..Default::default()
         };
         let mut out = ctx.run_ui(input, |ui| {
-            for label in ROWS {
-                let galley = ui.painter().layout_no_wrap(
-                    widgets::spaced(label),
+            for (icon, label) in ROWS {
+                let galley = widgets::icon_text(
+                    ui,
+                    icon,
+                    theme::ICON_INLINE,
+                    &widgets::spaced(label),
                     theme::font_small(),
-                    Color32::WHITE,
                 );
                 if galley.size().x > widest.0 {
                     widest = (galley.size().x, label);

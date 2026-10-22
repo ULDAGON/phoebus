@@ -850,6 +850,20 @@ pub const PLAYLIST_ART: f32 = 36.0;
 /// Vertical gap between the sections of the Search view.
 pub const SECTION_GAP: f32 = 20.0;
 
+/// Height of the Import view's drop field. Tall enough to be the obvious target at a
+/// glance from across the window, short enough to leave most of a `WINDOW_MIN`-tall window
+/// to the list of what was imported.
+pub const DROP_ZONE_H: f32 = 168.0;
+/// The import drop field's glyph.
+pub const ICON_DROP: f32 = 36.0;
+/// Cover square in the Import view's row editor — the drop target for a new cover, so it
+/// is sized as a target rather than as a thumbnail.
+pub const EDIT_COVER: f32 = 120.0;
+/// Width of the status column of an import row (`IMPORTED`, `MUSIC APP REFUSED`, …).
+pub const IMPORT_STATUS_W: f32 = 240.0;
+/// Dash and gap length of the drop field's idle outline.
+pub const DASH: f32 = 6.0;
+
 /// Maximum width of the player bar's centre "LCD".
 pub const LCD_MAX_W: f32 = 560.0;
 /// Height of the LCD box inside the 64 px player bar.
@@ -1080,12 +1094,22 @@ pub const GLYPH_CLOSE: &str = "\u{e4f6}";
 /// the same in either face — which is exactly why they cannot share a family
 /// (see [`install_fonts`]).
 pub const GLYPH_HEART: &str = "\u{e2a8}";
+/// Import — `tray-arrow-down`, U+E010. The sidebar row and the drop field: something
+/// arriving into a container is what an import is, and unlike `download-simple` it does
+/// not suggest a network.
+pub const GLYPH_IMPORT: &str = "\u{e010}";
+/// An import that failed — `warning`, U+E4E0. With one accent and no error colour in the
+/// palette, the glyph is what tells a failure from a plain status.
+pub const GLYPH_WARNING: &str = "\u{e4e0}";
+/// An empty cover slot in the import editor — `image`, U+E2CA: "an image goes here",
+/// where the library's `music-note` placeholder means "this album has no art".
+pub const GLYPH_IMAGE: &str = "\u{e2ca}";
 /// Separator between metadata fragments.
 pub const SEP: &str = " · ";
 
 /// Every icon the app paints, for the test that proves they all resolve to real outlines.
 #[cfg(test)]
-const ALL_GLYPHS: [(&str, &str); 21] = [
+const ALL_GLYPHS: [(&str, &str); 24] = [
     ("PREV", GLYPH_PREV),
     ("NEXT", GLYPH_NEXT),
     ("PLAY", GLYPH_PLAY),
@@ -1107,6 +1131,9 @@ const ALL_GLYPHS: [(&str, &str); 21] = [
     ("CHECK", GLYPH_CHECK),
     ("CLOSE", GLYPH_CLOSE),
     ("HEART", GLYPH_HEART),
+    ("IMPORT", GLYPH_IMPORT),
+    ("WARNING", GLYPH_WARNING),
+    ("IMAGE", GLYPH_IMAGE),
 ];
 
 // ---------------------------------------------------------------------------------------
