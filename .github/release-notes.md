@@ -1,13 +1,11 @@
-## What's new in v0.3.1
+## What's new in v0.3.2
 
-- **Output device changes no longer silence playback.** Unplugging the earphones, or
-  picking another output in Control Centre, used to leave the player "playing" with
-  no sound, and the app could not quit afterwards. Phoebus now follows the system's
-  default output device: playback moves to it within a second and keeps its position
-  and play/pause state.
-- **Shell-escaped paths work in Settings.** A library path pasted from a terminal
-  (`Mobile\ Documents/com\~apple\~CloudDocs`) is accepted as the same directory as its
-  plain spelling.
+- **A new app icon.** A thinner ring, a lighter plate that lightens towards the top, a
+  warmer yellow, and a fine grain on both. On macOS 26 it is drawn by the system like
+  the built-in apps.
+- **Albums and playlists open at the top.** A newly opened album could show the middle
+  of its tracklist, with the `← ALBUMS` button scrolled out of view. Now every album
+  and playlist opens at the top, and Back returns to the position you left.
 
 ## Install
 
